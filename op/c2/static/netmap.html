@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WiZZA — Network Map</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0 }
+body { font-family: 'Segoe UI', monospace, sans-serif; background: #0a0f1a; color: #b0c8e0; overflow: hidden; height: 100vh }
+#topbar { position: fixed; top: 0; left: 0; right: 0; height: 42px; background: #112240; border-bottom: 1px solid #1e3a5a;
+          display: flex; align-items: center; gap: 16px; padding: 0 16px; z-index: 100; font-size: 12px }
+#topbar .logo { color: #00c8ff; font-weight: 700; font-size: 14px; letter-spacing: 1px }
+#topbar .back { color: #7a9ab8; text-decoration: none }
+#topbar .back:hover { color: #00c8ff }
+#topbar .stat { color: #7a9ab8 }
+#topbar .stat b { color: #e0e8f0 }
+#topbar .controls { margin-left: auto; display: flex; gap: 8px }
+#topbar button { background: #1a3a6e; border: 1px solid #1e3a5a; color: #b0c8e0; padding: 4px 10px;
+                  border-radius: 3px; cursor: pointer; font-size: 11px }
+#topbar button:hover { background: #234a8a }
+#canvas-wrap { position: fixed; top: 42px; left: 0; right: 0; bottom: 0 }
+canvas { width: 100%; height: 100% }
+#tooltip { position: fixed; background: rgba(10,20,40,.97); border: 1px solid #1e3a5a;
+           border-radius: 6px; padding: 12px 16px; font-size: 12px; pointer-events: none;
+           z-index: 200; max-width: 300px; display: none }
+#tooltip .t-title { color: #00c8ff; font-weight: 700; font-size: 13px; margin-bottom: 8px }
+#tooltip .t-row { margin: 3px 0; color: #7a9ab8 }
+#tooltip .t-row b { color: #e0e8f0 }
+#tooltip .t-sev { font-weight: 700; font-size: 11px }
+#legend { position: fixed; bottom: 16px; left: 16px; background: rgba(10,20,40,.9);
+          border: 1px solid #1e3a5a; border-radius: 6px; padding: 12px; font-size: 11px; z-index: 100 }
+#legend h4 { color: #4a8ab8; margin-bottom: 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 1px }
+.leg-row { display: flex; align-items: center; gap: 8px; margin: 4px 0 }
+.leg-dot { width: 10px; height: 10px; border-radius: 50% }
+#info-panel { position: fixed; top: 58px; right: 0; width: 280px; background: #0d1b2a;
+              border-left: 1px solid #1e3a5a; height: calc(100vh - 58px); overflow-y: auto;
+              padding: 12px; font-size: 12px; z-index: 100; transform: translateX(100%);
+              transition: transform .2s }
+#info-panel.open { transform: translateX(0) }
+#info-panel h3 { color: #00c8ff; margin-bottom: 12px; font-size: 13px }
+#info-panel .row { margin: 6px 0; color: #7a9ab8 }
+#info-panel .row b { color: #e0e8f0 }
+#info-panel .cmd-list { margin-top: 12px }
+#info-panel .cmd-item { background: #112240; border-radius: 3px; padding: 6px 8px;
+                         margin: 4px 0; font-family: monospace; font-size: 11px; color: #00e676 }
+#info-panel .cmd-ts { color: #4a6a8a; font-size: 10px }
+#close-panel { background: none; border: none; color: #ff5252; cursor: pointer; float: right; font-size: 16px }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <span class="logo">⚡ WiZZA NetMap</span>
+  <a class="back" href="/panel">← Panel</a>
+  <span class="stat">Hosts: <b id="stat-hosts">0</b></span>
+  <span class="stat">Online: <b id="stat-online">0</b></span>
+  <span class="stat">Worms: <b id="stat-worms">0</b></span>
+  <div class="controls">
+    <button onclick="resetView()">Reset View</button>
+    <button onclick="toggleLayout()">Toggle Layout</button>
+    <button onclick="refreshData()">⟳ Refresh</button>
+    <button onclick="exportSvg()">Export SVG</button>
+  </div>
+</div>
+
+<div id="canvas-wrap">
+  <canvas id="cv"></canvas>
+</div>
+
+<div id="tooltip"></div>
+
+<div id="legend">
+  <h4>Legend</h4>
+  <div class="leg-row"><div class="leg-dot" style="background:#ff3a3a"></div> CRITICAL (root/SYSTEM)</div>
+  <div class="leg-row"><div class="leg-dot" style="background:#ff8c00"></div> HIGH (admin)</div>
+  <div class="leg-row"><div class="leg-dot" style="background:#ffd700"></div> MEDIUM (user)</div>
+  <div class="leg-row"><div class="leg-dot" style="background:#ff4fc8;border-radius:3px"></div> Worm Agent</div>
+  <div class="leg-row"><div class="leg-dot" style="background:#00c8ff"></div> C2 Server</div>
+  <div class="leg-row" style="color:#7a9ab8;font-size:10px;margin-top:4px">
+    Scroll: zoom &nbsp;|&nbsp; Drag: pan &nbsp;|&nbsp; Click: details
+  </div>
+</div>
+
+<div id="info-panel">
+  <button id="close-panel" onclick="closePanel()">✕</button>
+  <h3 id="panel-title">Agent Details</h3>
+  <div id="panel-body"></div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+var agents = {};
+var nodes  = [];
+var edges  = [];
+var canvas, ctx, W, H;
+var zoom   = 1, panX = 0, panY = 0;
+var drag   = null, lastMouse = null, isDragging = false;
+var layout = 'force';   // 'force' or 'radial'
+var anim, simRunning = true;
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function severity(a) {
+  var p = (a.priv||'').toUpperCase();
+  if (/ROOT|SYSTEM|ADMIN|NT AUTHORITY/.test(p)) return 'CRITICAL';
+  if (/SUDO|WHEEL|DOMAIN/.test(p))              return 'HIGH';
+  return 'MEDIUM';
+}
+function sevColor(s) {
+  return {CRITICAL:'#ff3a3a',HIGH:'#ff8c00',MEDIUM:'#ffd700'}[s] || '#aaa';
+}
+function nodeColor(n) {
+  if (n.type === 'c2') return '#00c8ff';
+  if ((n.agent_type||'').includes('worm')) return '#ff4fc8';
+  return sevColor(n.severity);
+}
+function nodeRadius(n) {
+  if (n.type === 'c2') return 22;
+  if ((n.agent_type||'').includes('worm')) return 14;
+  return {'CRITICAL':18,'HIGH':15,'MEDIUM':12}[n.severity] || 12;
+}
+
+// ── Data fetch ─────────────────────────────────────────────────────────────
+function refreshData() {
+  fetch('/agents/json').then(r=>r.json()).then(data => {
+    agents = data;
+    buildGraph();
+    updateStats();
+    if (!anim) startAnim();
+  }).catch(e => {
+    console.warn('fetch failed:', e);
+    // Demo mode with fake data
+    agents = {
+      'demo_01': { ip:'192.168.1.10', hostname:'WORKSTATION01', user:'jdoe', priv:'user',
+                   os:'Windows 11 x64', type:'worm', status:'ONLINE', last_seen:'12:34:56' },
+      'demo_02': { ip:'192.168.1.20', hostname:'DC01', user:'Administrator', priv:'ADMIN',
+                   os:'Windows Server 2022', type:'http', status:'ONLINE', last_seen:'12:35:01' },
+      'demo_03': { ip:'10.0.0.5', hostname:'LINUX-SRV', user:'root', priv:'ROOT',
+                   os:'Ubuntu 22.04 LTS', type:'worm', status:'OFFLINE', last_seen:'12:30:00' },
+    };
+    buildGraph();
+    updateStats();
+    if (!anim) startAnim();
+  });
+}
+
+function updateStats() {
+  var keys = Object.keys(agents);
+  document.getElementById('stat-hosts').textContent  = keys.length;
+  document.getElementById('stat-online').textContent = keys.filter(k=>(agents[k].status||'ONLINE')==='ONLINE').length;
+  document.getElementById('stat-worms').textContent  = keys.filter(k=>(agents[k].type||'').includes('worm')).length;
+}
+
+// ── Graph construction ─────────────────────────────────────────────────────
+function buildGraph() {
+  var cx = W/2, cy = H/2;
+
+  // C2 node
+  var c2node = nodes.find(n=>n.type==='c2');
+  if (!c2node) {
+    c2node = { id:'__C2__', type:'c2', label:'C2', x:cx, y:cy, vx:0, vy:0,
+               ip:'localhost', severity:'C2', agent_type:'' };
+    nodes = [c2node];
+  }
+
+  // Merge agents
+  var seen = new Set(['__C2__']);
+  Object.keys(agents).forEach(aid => {
+    seen.add(aid);
+    var a = agents[aid];
+    var existing = nodes.find(n=>n.id===aid);
+    var sev = severity(a);
+    if (!existing) {
+      var angle = Math.random()*Math.PI*2;
+      var dist  = 150 + Math.random()*150;
+      existing = { id:aid, type:'agent', label:aid.substr(0,10),
+                   x: cx + Math.cos(angle)*dist,
+                   y: cy + Math.sin(angle)*dist,
+                   vx:0, vy:0 };
+      nodes.push(existing);
+    }
+    Object.assign(existing, {
+      ip: a.ip||'?', hostname: a.hostname||'?', user: a.user||'?',
+      priv: a.priv||'?', os: (a.os||'?').substr(0,60),
+      agent_type: a.type||'?', status: a.status||'ONLINE',
+      severity: sev, last_seen: a.last_seen||'?',
+      persist: (a.persist_methods||[]).join(', ')||'—',
+      spread_count: (a.spread_log||[]).length,
+    });
+  });
+
+  // Remove stale nodes
+  nodes = nodes.filter(n=>seen.has(n.id));
+
+  // Rebuild edges
+  edges = nodes.filter(n=>n.type!=='c2').map(n=>({src:'__C2__', dst:n.id}));
+
+  // Spread edges (worm→spread target if target is also an agent)
+  Object.keys(agents).forEach(aid => {
+    var a = agents[aid];
+    if (!a.spread_log) return;
+    a.spread_log.forEach(tgt => {
+      var tnode = nodes.find(n=>n.ip===tgt||n.hostname===tgt||n.id===tgt);
+      if (tnode && tnode.id !== '__C2__') {
+        edges.push({src:aid, dst:tnode.id, spread:true});
+      }
+    });
+  });
+}
+
+// ── Force simulation ───────────────────────────────────────────────────────
+function tick() {
+  if (!simRunning) return;
+  var cx = W/2, cy = H/2;
+
+  nodes.forEach(n => {
+    if (n.pinned) return;
+    // Gravity toward center
+    n.vx += (cx - n.x) * 0.002;
+    n.vy += (cy - n.y) * 0.002;
+  });
+
+  // Repulsion
+  for (var i=0;i<nodes.length;i++) {
+    for (var j=i+1;j<nodes.length;j++) {
+      var a=nodes[i], b=nodes[j];
+      var dx=b.x-a.x, dy=b.y-a.y;
+      var dist=Math.sqrt(dx*dx+dy*dy)||1;
+      var force=2500/(dist*dist);
+      var fx=dx/dist*force, fy=dy/dist*force;
+      a.vx-=fx; a.vy-=fy;
+      b.vx+=fx; b.vy+=fy;
+    }
+  }
+
+  // Attraction on edges
+  edges.forEach(e => {
+    var s=nodes.find(n=>n.id===e.src), d=nodes.find(n=>n.id===e.dst);
+    if (!s||!d) return;
+    var dx=d.x-s.x, dy=d.y-s.y;
+    var dist=Math.sqrt(dx*dx+dy*dy)||1;
+    var ideal=e.spread?100:200;
+    var force=(dist-ideal)*0.03;
+    var fx=dx/dist*force, fy=dy/dist*force;
+    s.vx+=fx; s.vy+=fy;
+    d.vx-=fx; d.vy-=fy;
+  });
+
+  // Integrate
+  nodes.forEach(n => {
+    if (n.pinned) return;
+    n.vx *= 0.85; n.vy *= 0.85;
+    n.x += n.vx; n.y += n.vy;
+  });
+}
+
+function radialLayout() {
+  var cx=W/2, cy=H/2;
+  var c2=nodes.find(n=>n.type==='c2');
+  if (c2) { c2.x=cx; c2.y=cy; c2.pinned=true; }
+  var agents_n=nodes.filter(n=>n.type!=='c2');
+  agents_n.forEach((n,i) => {
+    var angle = (i/agents_n.length)*Math.PI*2 - Math.PI/2;
+    n.x = cx + Math.cos(angle)*200;
+    n.y = cy + Math.sin(angle)*200;
+    n.pinned = true;
+  });
+}
+
+function toggleLayout() {
+  layout = layout==='force'?'radial':'force';
+  if (layout==='radial') {
+    simRunning=false;
+    radialLayout();
+    render();
+  } else {
+    nodes.forEach(n=>{ n.pinned=false; n.vx=0; n.vy=0; });
+    simRunning=true;
+  }
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────
+function render() {
+  ctx.clearRect(0,0,W,H);
+  ctx.save();
+  ctx.translate(panX,panY);
+  ctx.scale(zoom,zoom);
+
+  // Draw edges
+  edges.forEach(e => {
+    var s=nodes.find(n=>n.id===e.src), d=nodes.find(n=>n.id===e.dst);
+    if (!s||!d) return;
+    ctx.beginPath();
+    ctx.moveTo(s.x,s.y);
+    ctx.lineTo(d.x,d.y);
+    ctx.strokeStyle = e.spread ? 'rgba(255,77,200,.25)' : 'rgba(0,200,255,.12)';
+    ctx.lineWidth   = e.spread ? 1.5 : 1;
+    if (e.spread) { ctx.setLineDash([4,4]); } else { ctx.setLineDash([]); }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  });
+
+  // Draw nodes
+  nodes.forEach(n => {
+    var r = nodeRadius(n);
+    var col = nodeColor(n);
+    var online = n.type==='c2' || (n.status||'ONLINE')==='ONLINE';
+
+    // Glow for online
+    if (online) {
+      var grad = ctx.createRadialGradient(n.x,n.y,r*.5,n.x,n.y,r*2.5);
+      grad.addColorStop(0, col+'44');
+      grad.addColorStop(1, 'transparent');
+      ctx.beginPath();
+      ctx.arc(n.x,n.y,r*2.5,0,Math.PI*2);
+      ctx.fillStyle=grad;
+      ctx.fill();
+    }
+
+    // Node body
+    ctx.beginPath();
+    if ((n.agent_type||'').includes('worm')) {
+      // Diamond for worms
+      ctx.moveTo(n.x, n.y-r);
+      ctx.lineTo(n.x+r, n.y);
+      ctx.lineTo(n.x, n.y+r);
+      ctx.lineTo(n.x-r, n.y);
+      ctx.closePath();
+    } else {
+      ctx.arc(n.x,n.y,r,0,Math.PI*2);
+    }
+    ctx.fillStyle = online ? col+'cc' : col+'44';
+    ctx.fill();
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Offline indicator
+    if (!online) {
+      ctx.beginPath();
+      ctx.arc(n.x,n.y,r+4,0,Math.PI*2);
+      ctx.strokeStyle='#ff525244';
+      ctx.lineWidth=1;
+      ctx.setLineDash([3,3]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Label
+    ctx.fillStyle = '#b0c8e0';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(n.label||n.id.substr(0,10), n.x, n.y+r+13);
+
+    // IP under label
+    if (n.ip && n.ip !== 'localhost') {
+      ctx.fillStyle = '#4a6a8a';
+      ctx.font = '9px monospace';
+      ctx.fillText(n.ip, n.x, n.y+r+24);
+    }
+  });
+
+  ctx.restore();
+}
+
+function startAnim() {
+  function loop() {
+    if (simRunning) tick();
+    render();
+    anim = requestAnimationFrame(loop);
+  }
+  loop();
+}
+
+// ── Hit test ───────────────────────────────────────────────────────────────
+function hitNode(mx,my) {
+  var wx=(mx-panX)/zoom, wy=(my-panY)/zoom;
+  for (var i=nodes.length-1;i>=0;i--) {
+    var n=nodes[i], r=nodeRadius(n)+6;
+    if (Math.abs(wx-n.x)<r && Math.abs(wy-n.y)<r) return n;
+  }
+  return null;
+}
+
+// ── Tooltip ────────────────────────────────────────────────────────────────
+function showTooltip(n, mx, my) {
+  var tt = document.getElementById('tooltip');
+  var col = nodeColor(n);
+  var content = '<div class="t-title">' + escH(n.label||n.id) + '</div>';
+  if (n.type==='c2') {
+    content += '<div class="t-row">WiZZA C2 Server</div>';
+  } else {
+    content += '<div class="t-row"><b>IP:</b> ' + escH(n.ip) + '</div>';
+    content += '<div class="t-row"><b>Host:</b> ' + escH(n.hostname) + '</div>';
+    content += '<div class="t-row"><b>User:</b> ' + escH(n.user) + ' / ' + escH(n.priv) + '</div>';
+    content += '<div class="t-row"><b>OS:</b> ' + escH(n.os) + '</div>';
+    content += '<div class="t-row"><b>Type:</b> ' + escH(n.agent_type) + '</div>';
+    content += '<div class="t-row"><b>Status:</b> <span style="color:' + ((n.status||'ONLINE')==='ONLINE'?'#00e676':'#ff5252') + '">' + escH(n.status||'ONLINE') + '</span></div>';
+    content += '<div class="t-row t-sev" style="color:' + col + '">Severity: ' + escH(n.severity) + '</div>';
+    if (n.persist) content += '<div class="t-row"><b>Persist:</b> ' + escH(n.persist.substr(0,50)) + '</div>';
+    if (n.spread_count) content += '<div class="t-row"><b>Spread:</b> ' + n.spread_count + ' hosts</div>';
+  }
+  tt.innerHTML = content;
+  var left = mx + 14, top = my - 10;
+  if (left + 310 > window.innerWidth) left = mx - 320;
+  if (top + 200 > window.innerHeight) top = window.innerHeight - 210;
+  tt.style.left = left + 'px';
+  tt.style.top  = top  + 'px';
+  tt.style.display = 'block';
+}
+function hideTooltip() { document.getElementById('tooltip').style.display='none'; }
+
+function escH(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Info panel ─────────────────────────────────────────────────────────────
+function openPanel(n) {
+  if (n.type==='c2') return;
+  var col = nodeColor(n);
+  document.getElementById('panel-title').textContent = n.id;
+  var body = '';
+  body += '<div class="row"><b>IP:</b> ' + escH(n.ip) + '</div>';
+  body += '<div class="row"><b>Hostname:</b> ' + escH(n.hostname) + '</div>';
+  body += '<div class="row"><b>User:</b> ' + escH(n.user) + '</div>';
+  body += '<div class="row"><b>Privilege:</b> <span style="color:' + col + '">' + escH(n.priv) + '</span></div>';
+  body += '<div class="row"><b>OS:</b> ' + escH(n.os) + '</div>';
+  body += '<div class="row"><b>Type:</b> ' + escH(n.agent_type) + '</div>';
+  body += '<div class="row"><b>Status:</b> <span style="color:' + ((n.status||'ONLINE')==='ONLINE'?'#00e676':'#ff5252') + '">' + escH(n.status||'ONLINE') + '</span></div>';
+  body += '<div class="row"><b>Last Seen:</b> ' + escH(n.last_seen) + '</div>';
+  if (n.persist && n.persist !== '—') body += '<div class="row"><b>Persistence:</b> ' + escH(n.persist) + '</div>';
+  body += '<br>';
+  body += '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:8px">';
+  var cmds = ['RECON','SCREENSHOT','LSASS_DUMP','AMSI_BYPASS','KERBEROAST','PTY_START','PROXY_START'];
+  cmds.forEach(c => {
+    body += '<a href="/q?aid=' + encodeURIComponent(n.id) + '&cmd=' + encodeURIComponent(c) + '" '
+          + 'style="background:#1a3a6e;border:1px solid #1e3a5a;color:#b0c8e0;padding:3px 7px;'
+          + 'border-radius:3px;font-size:10px;text-decoration:none">' + c + '</a>';
+  });
+  body += '</div>';
+  body += '<div style="margin-top:8px"><a href="/pty/' + encodeURIComponent(n.id) + '/term" '
+        + 'target="_blank" style="color:#00e676;font-size:11px">🖥 Open PTY Shell</a></div>';
+  document.getElementById('panel-body').innerHTML = body;
+  document.getElementById('info-panel').classList.add('open');
+}
+function closePanel() { document.getElementById('info-panel').classList.remove('open'); }
+
+// ── Canvas events ──────────────────────────────────────────────────────────
+function initCanvas() {
+  canvas = document.getElementById('cv');
+  var wrap = document.getElementById('canvas-wrap');
+  W = canvas.width  = wrap.clientWidth;
+  H = canvas.height = wrap.clientHeight;
+  ctx = canvas.getContext('2d');
+  panX = 0; panY = 0;
+
+  canvas.addEventListener('mousedown', e => {
+    var n = hitNode(e.offsetX, e.offsetY);
+    if (n) { drag = n; n.pinned = true; isDragging = false; }
+    else { drag = null; }
+    lastMouse = {x:e.offsetX, y:e.offsetY};
+  });
+
+  canvas.addEventListener('mousemove', e => {
+    if (drag) {
+      drag.x += (e.offsetX - lastMouse.x) / zoom;
+      drag.y += (e.offsetY - lastMouse.y) / zoom;
+      drag.vx = 0; drag.vy = 0;
+      isDragging = true;
+    } else if (lastMouse && e.buttons === 1) {
+      panX += e.offsetX - lastMouse.x;
+      panY += e.offsetY - lastMouse.y;
+    }
+    lastMouse = {x:e.offsetX, y:e.offsetY};
+    var n = hitNode(e.offsetX, e.offsetY);
+    if (n) showTooltip(n, e.clientX, e.clientY);
+    else hideTooltip();
+  });
+
+  canvas.addEventListener('mouseup', e => {
+    if (drag && !isDragging) {
+      openPanel(drag);
+      drag.pinned = false;
+    }
+    if (drag && layout === 'force') drag.pinned = false;
+    drag = null; isDragging = false;
+    lastMouse = null;
+  });
+
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    var factor = e.deltaY < 0 ? 1.1 : 0.9;
+    var mx = e.offsetX, my = e.offsetY;
+    panX = mx - (mx - panX) * factor;
+    panY = my - (my - panY) * factor;
+    zoom *= factor;
+    zoom = Math.max(0.2, Math.min(5, zoom));
+  }, {passive:false});
+
+  canvas.addEventListener('mouseleave', hideTooltip);
+
+  window.addEventListener('resize', () => {
+    W = canvas.width  = wrap.clientWidth;
+    H = canvas.height = wrap.clientHeight;
+  });
+}
+
+function resetView() { zoom=1; panX=0; panY=0; }
+
+function exportSvg() {
+  // Simple SVG export
+  var lines = ['<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '" style="background:#0a0f1a">'];
+  edges.forEach(e => {
+    var s=nodes.find(n=>n.id===e.src), d=nodes.find(n=>n.id===e.dst);
+    if (!s||!d) return;
+    lines.push('<line x1="'+s.x+'" y1="'+s.y+'" x2="'+d.x+'" y2="'+d.y+'" stroke="rgba(0,200,255,.2)" stroke-width="1"/>');
+  });
+  nodes.forEach(n => {
+    var col=nodeColor(n), r=nodeRadius(n);
+    lines.push('<circle cx="'+n.x+'" cy="'+n.y+'" r="'+r+'" fill="'+col+'88" stroke="'+col+'" stroke-width="1.5"/>');
+    lines.push('<text x="'+n.x+'" y="'+(n.y+r+14)+'" fill="#b0c8e0" font-size="10" text-anchor="middle" font-family="monospace">'+escH(n.label||n.id.substr(0,10))+'</text>');
+  });
+  lines.push('</svg>');
+  var blob = new Blob([lines.join('\n')], {type:'image/svg+xml'});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'wizza_netmap.svg';
+  a.click();
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+initCanvas();
+refreshData();
+
+// Auto-refresh every 10s
+setInterval(refreshData, 10000);
+</script>
+</body>
+</html>
