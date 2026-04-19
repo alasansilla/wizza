@@ -48,7 +48,7 @@ Keylogger/
     │   └── SecureCertUpdate.hta
     ├── bitb/
     │   ├── index.html       # Default BitB page
-    │   └── themes/          # facebook / google / gov-gambia / julazone / outlook
+    │   └── themes/          # facebook / google / julazone / outlook
     ├── mitm/
     │   ├── intercept.py     # mitmproxy JS keylogger injector
     │   └── catcher.py       # Keystroke/credential catcher server

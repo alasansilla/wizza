@@ -36,3 +36,40 @@
 [03:08:11] Weapon:  (direction: remote)
 [03:08:25] Tunnel: https://animal-large-startup-transmit.trycloudflare.com → masked: https://animal-large-startup-transmit.trycloudflare.com
 [03:08:25] Keylogger running — tunnel: https://animal-large-startup-transmit.trycloudflare.com
+[13:06:54] Anonymity verified — exit: 192.42.116.21 (The Netherlands, Amsterdam)
+[13:08:15] Direction: worm
+[13:08:19] Config: worm mode, ip=192.168.2.138
+[13:10:59] Worm deployed — C2: https://eds-nottingham-database-softball.trycloudflare.com
+[13:18:57] Anonymity verified — exit: 192.42.116.93 (The Netherlands, Amsterdam)
+[13:19:02] Direction: worm
+[13:19:10] Config: worm mode, ip=192.168.2.192
+[13:28:49] Anonymity verified — exit: 192.42.116.42 (The Netherlands, Amsterdam)
+[13:45:23] Direction: worm
+[13:45:26] Config: worm mode, ip=192.168.2.201
+[13:46:21] Worm deployed — C2: https://licence-temperatures-served-draft.trycloudflare.com
+[14:04:44] Anonymity verified — exit: 38.135.25.97 (United States, Somers)
+[14:04:44] Direction: remote
+[14:04:44] Weapon:  (direction: remote)
+[14:04:44] Config: target= ip=192.168.2.206
+[14:27:48] Anonymity verified — exit: 185.243.218.232 (Norway, Sandefjord)
+[14:27:53] Direction: worm
+[14:27:55] Config: worm mode, ip=192.168.2.154
+[14:29:31] Worm deployed — C2: https://duration-cute-legislature-duty.trycloudflare.com
+[14:48:49] Direction: worm
+[14:48:50] Config: worm mode, ip=192.168.2.158
+[14:49:17] Worm deployed — C2: https://assurance-brochures-increase-fred.trycloudflare.com
+[16:10:19] Direction: worm
+[16:10:55] Config: worm mode, ip=192.168.2.112
+[16:13:15] Direction: worm
+[16:13:16] Config: worm mode, ip=192.168.2.112
+[16:14:47] Worm deployed — C2: https://supreme-using-nuts-videos.trycloudflare.com
+[16:30:01] Anonymity verified — exit: 192.42.116.17 (The Netherlands, Amsterdam)
+[16:30:01] Direction: remote
+[16:30:01] Weapon:  (direction: remote)
+[16:30:01] Config: target= ip=192.168.2.115
+[16:55:25] Anonymity verified — exit: 38.135.24.122 (United States, Somers)
+[16:56:37] Direction: physical
+[16:57:56] Weapon: 1 (direction: physical)
+[16:59:01] Config: target=instagram.com ip=192.168.2.101
+[17:01:31] Victim IP: 192.168.2.187
+[17:01:36] Physical keylogger running — victim: 192.168.2.187

