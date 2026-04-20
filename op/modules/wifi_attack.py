@@ -789,10 +789,31 @@ if __name__ == "__main__":
         crack_handshake(args.cap or f"{args.out}/wizza_hs_{args.bssid}.cap",
                         wordlist=args.wordlist, bssid=args.bssid)
     elif args.action == "pmkid":
-        pmkid_attack(args.iface, bssid=args.bssid,
-                     duration=args.duration, wordlist=args.wordlist)
+        # Enable monitor mode if interface is not already in monitor mode
+        _mon = args.iface
+        iw_out = subprocess.getoutput(f"iw dev {args.iface} info 2>/dev/null")
+        if "type monitor" not in iw_out:
+            print(f"[*] Enabling monitor mode on {args.iface}...")
+            _mon = enable_monitor(args.iface)
+            if not _mon:
+                print(f"[!] Failed to enable monitor mode on {args.iface}")
+                sys.exit(1)
+        try:
+            pmkid_attack(_mon, bssid=args.bssid,
+                         duration=args.duration, wordlist=args.wordlist)
+        finally:
+            if _mon != args.iface:
+                disable_monitor(_mon)
     elif args.action == "deauth":
-        deauth(args.iface, args.bssid)
+        _mon = args.iface
+        iw_out = subprocess.getoutput(f"iw dev {args.iface} info 2>/dev/null")
+        if "type monitor" not in iw_out:
+            _mon = enable_monitor(args.iface)
+        try:
+            deauth(_mon, args.bssid)
+        finally:
+            if _mon != args.iface:
+                disable_monitor(_mon)
     elif args.action == "wep":
         wep_crack(args.iface, args.bssid, args.channel)
     elif args.action == "wps":
