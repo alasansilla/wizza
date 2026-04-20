@@ -6906,16 +6906,18 @@ cmd_netmap() {
 }
 
 # ── Root privilege helper ─────────────────────────────────────────────────────
+# Caches sudo credentials for the session — does NOT re-exec the script
+# (re-exec loses subcommand context and restarts the wizard from scratch)
 check_root() {
     if [ "$EUID" -ne 0 ]; then
-        warn "This operation requires root privileges."
-        ask "Re-launch with sudo? [Y/n]: "
-        read -r _CR
-        if [[ "${_CR,,}" != "n" ]]; then
-            exec sudo bash "$0" "$@"
-        else
-            die "Root required — aborting."
+        warn "Root privileges required for this operation."
+        echo ""
+        echo -e "  Enter your sudo password to continue (credentials cached for session):"
+        if ! sudo -v 2>&1; then
+            die "sudo authentication failed — aborting."
         fi
+        # Re-export so child sudo calls in this function's caller work silently
+        export SUDO_CACHED=1
     fi
 }
 
