@@ -27,7 +27,7 @@ Techniques that compromise hosts without any user action:
 
 6. WebDAV Credential Capture
    Poison LLMNR/WPAD to redirect WebDAV shares — Windows auto-authenticates
-   with NTLMv2 on UNC path access (\\server\share format in browser URLs).
+   with NTLMv2 on UNC path access (\\\\server\\share format in browser URLs).
 
 7. ADIDNS + WPAD Wildcard (authenticated insider)
    Add wildcard DNS entry via LDAP (no special AD rights needed by default)

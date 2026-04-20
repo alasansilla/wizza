@@ -6,7 +6,8 @@
 
 # ── Base directory — resolve symlinks so 'bash ~/start' works too ────
 _SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
-OP="$(cd "$(dirname "$_SELF")" && pwd)/op"
+DIR="$(cd "$(dirname "$_SELF")" && pwd)"
+OP="$DIR/op"
 
 # ── Derived paths ─────────────────────────────────────────────
 BITB_DIR="$OP/bitb"
@@ -6901,6 +6902,20 @@ cmd_netmap() {
         ok "Opened in browser"
     else
         echo -e "  ${Y}Browse to: $C2URL/netmap${N}"
+    fi
+}
+
+# ── Root privilege helper ─────────────────────────────────────────────────────
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        warn "This operation requires root privileges."
+        ask "Re-launch with sudo? [Y/n]: "
+        read -r _CR
+        if [[ "${_CR,,}" != "n" ]]; then
+            exec sudo bash "$0" "$@"
+        else
+            die "Root required — aborting."
+        fi
     fi
 }
 
