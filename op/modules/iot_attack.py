@@ -651,6 +651,7 @@ def telnet_brute(ip, port=23, creds=None, timeout=4):
         creds = DEFAULT_CREDS
 
     for user, passwd in creds:
+        s = None
         try:
             s = socket.socket()
             s.settimeout(timeout)
@@ -689,7 +690,6 @@ def telnet_brute(ip, port=23, creds=None, timeout=4):
                 buf3 = s.recv(512)
             except Exception:
                 pass
-            s.close()
             resp = (buf + buf2 + buf3).decode(errors="replace").lower()
             if any(x in resp for x in ["$", "#", ">", "shell", "busybox",
                                         "welcome", "linux", "bash"]):
@@ -698,6 +698,10 @@ def telnet_brute(ip, port=23, creds=None, timeout=4):
                     return user, passwd
         except Exception:
             pass
+        finally:
+            if s:
+                try: s.close()
+                except: pass
     return None
 
 

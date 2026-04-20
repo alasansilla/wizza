@@ -81,17 +81,45 @@ def list_interfaces():
 
 
 def enable_monitor(iface):
-    """Put interface into monitor mode. Returns monitor interface name."""
+    """Put interface into monitor mode. Returns monitor interface name.
+
+    WARNING: airmon-ng check kill will disconnect any active WiFi session
+    on this adapter. Use a dedicated second USB WiFi adapter for attacks
+    so your primary internet connection stays up.
+    """
     _require_root()
-    # Kill interfering processes
+
+    # Warn if this looks like the only/primary interface
+    all_wlan = [d for d in os.listdir("/sys/class/net")
+                if d.startswith("wlan") or d.startswith("wlp")]
+    if len(all_wlan) == 1:
+        print(f"[!] WARNING: {iface} appears to be your ONLY wireless adapter.")
+        print(f"[!] Enabling monitor mode will kill your WiFi connection.")
+        print(f"[!] Press Ctrl-C to abort, or wait 5s to continue...")
+        try:
+            time.sleep(5)
+        except KeyboardInterrupt:
+            print("\n[-] Aborted.")
+            return None
+
+    # Use iw directly instead of airmon-ng to avoid killing NetworkManager
+    # Try virtual monitor interface first (keeps managed iface alive)
+    vmon = f"{iface}mon"
+    out = _run(f"iw dev {iface} interface add {vmon} type monitor 2>&1", capture=True)
+    if "already exists" in out or out == "":
+        _run(f"ip link set {vmon} up 2>/dev/null")
+        if os.path.exists(f"/sys/class/net/{vmon}"):
+            print(f"[+] Virtual monitor interface {vmon} created (managed mode kept alive)")
+            return vmon
+
+    # Fall back to airmon-ng (kills managed mode)
+    print(f"[*] Virtual monitor failed, falling back to airmon-ng (will disconnect WiFi)...")
     _run("airmon-ng check kill 2>/dev/null")
     time.sleep(1)
     out = _run(f"airmon-ng start {iface} 2>&1", capture=True)
-    # Parse new interface name (e.g. wlan0mon)
     m = re.search(r'monitor mode (?:enabled|vif enabled) (?:on|for) \[?(\w+)\]?', out)
     if m:
         return m.group(1)
-    # Common convention
     if os.path.exists(f"/sys/class/net/{iface}mon"):
         return f"{iface}mon"
     return iface
