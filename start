@@ -1524,26 +1524,47 @@ CFEOF
     read -r MASK_CHOICE
 
     shorten_url() {
-        local url="$1" alias="$2" result=""
-        # Always use direct connection (not Tor) — shorteners block Tor exits
+        local url="$1" alias="$2" result="" encoded_url
+        encoded_url=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$url" 2>/dev/null || echo "$url")
+
+        # Always bypass Tor for shorteners (--noproxy '*')
+        local _curl="curl -s --max-time 8 --connect-timeout 5 --noproxy '*' -A 'Mozilla/5.0'"
+
+        # 1. TinyURL with custom alias
         if [ -n "$alias" ]; then
-            result=$(curl -s --max-time 10 --noproxy '*' \
-                "https://tinyurl.com/api-create.php?url=$url&alias=$alias" 2>/dev/null)
-            echo "$result" | grep -q "Error\|already\|invalid" && result=""
+            result=$(eval "$_curl" "\"https://tinyurl.com/api-create.php?url=${encoded_url}&alias=${alias}\"" 2>/dev/null)
+            echo "$result" | grep -qE "^https?://" || result=""
         fi
-        # TinyURL auto
-        [ -z "$result" ] && result=$(curl -s --max-time 10 --noproxy '*' \
-            "https://tinyurl.com/api-create.php?url=$url" 2>/dev/null)
-        # Fallback: is.gd
-        if [ -z "$result" ] || echo "$result" | grep -qi "error"; then
-            result=$(curl -s --max-time 10 --noproxy '*' \
-                "https://is.gd/create.php?format=simple&url=$url" 2>/dev/null)
+
+        # 2. TinyURL auto
+        if [ -z "$result" ]; then
+            result=$(eval "$_curl" "\"https://tinyurl.com/api-create.php?url=${encoded_url}\"" 2>/dev/null)
+            echo "$result" | grep -qE "^https?://" || result=""
         fi
-        # Fallback: v.gd
-        if [ -z "$result" ] || echo "$result" | grep -qi "error"; then
-            result=$(curl -s --max-time 10 --noproxy '*' \
-                "https://v.gd/create.php?format=simple&url=$url" 2>/dev/null)
+
+        # 3. cleanuri.com — accepts CF tunnel URLs
+        if [ -z "$result" ]; then
+            result=$(eval "$_curl" -X POST \
+                "\"https://cleanuri.com/api/v1/shorten\"" \
+                --data "\"url=${encoded_url}\"" 2>/dev/null \
+                | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('result_url',''))" 2>/dev/null)
+            echo "$result" | grep -qE "^https?://" || result=""
         fi
+
+        # 4. is.gd
+        if [ -z "$result" ]; then
+            result=$(eval "$_curl" \
+                "\"https://is.gd/create.php?format=simple&url=${encoded_url}\"" 2>/dev/null)
+            echo "$result" | grep -qE "^https?://" || result=""
+        fi
+
+        # 5. v.gd
+        if [ -z "$result" ]; then
+            result=$(eval "$_curl" \
+                "\"https://v.gd/create.php?format=simple&url=${encoded_url}\"" 2>/dev/null)
+            echo "$result" | grep -qE "^https?://" || result=""
+        fi
+
         echo "$result"
     }
 
