@@ -1,27 +1,42 @@
-# Offensive Operations Toolkit
+# WiZZA — Offensive Operations Toolkit
 **Authorized penetration testing only. Unauthorized use is illegal.**
 
 ---
 
 ## Overview
 
-A full-stack offensive security toolkit with three operation modes:
+A full-stack offensive security toolkit with 9 operation modes:
 
 | Mode | Description |
 |------|-------------|
 | **1. BitB** | Browser-in-the-Browser phishing overlay |
 | **2. MitM Keylogger** | ARP/DNS spoofing + JS keylogger injection |
 | **3. Payload C2** | Full C2 server with advanced agents and worm |
+| **4. WiFi Attack** | WPA2 PMKID/handshake, deauth, evil twin AP |
+| **5. IoT Attack** | Camera RTSP, MQTT, Modbus, ROS, default creds, CVEs |
+| **6. Network/Web CVEs** | 11 CVE exploits (Log4Shell, ZeroLogon, Follina, etc.) |
+| **7. BYOVD** | Bring-Your-Own-Vulnerable-Driver kernel R/W |
+| **8. Defender Kill** | Full EDR/AV elimination (6-layer) |
+| **9. Zero-Click** | IPv6 RA, WPAD, SMB relay, mDNS poison, DCOM |
 
 ---
 
 ## Quick Start
 
 ```bash
+cd /home/heilige/Keylogger
 bash start
 ```
 
 Interactive wizard — picks tunnel, operation mode, and builds all payloads.
+
+Direct module access:
+```bash
+bash start wifi          # WiFi attack menu
+bash start iot           # IoT attack menu
+bash start exploit       # CVE exploit menu
+bash start zeroclick     # Zero-click attack menu
+```
 
 ---
 
@@ -29,32 +44,36 @@ Interactive wizard — picks tunnel, operation mode, and builds all payloads.
 
 ```
 Keylogger/
-├── start                    # Main launcher wizard
+├── start                        # Main launcher wizard (~7300 lines)
 ├── README.md
+├── CLAUDE.md                    # AI assistant context (Claude Code)
+├── .cursorrules                 # AI assistant context (Cursor)
 └── op/
     ├── c2/
-    │   └── c2_server.py     # C2 HTTP server (port 8888) + TCP listener (4444)
-    ├── victim/
-    │   ├── agent_http.py    # Standard RAT agent (source)
-    │   ├── worm_agent.py    # Self-propagating worm (source)
-    │   ├── agent.ps1        # PowerShell agent (source)
-    │   └── worm_agent.ps1   # PowerShell worm (source)
-    ├── payloads/            # Baked payloads (C2 URL injected)
-    │   ├── agent_http.py
-    │   ├── agent.py
-    │   ├── agent.ps1
-    │   ├── worm_agent.py
-    │   ├── worm_agent.ps1
-    │   └── SecureCertUpdate.hta
+    │   └── c2_server.py         # C2 HTTP server (8888) + TCP listener (4444)
+    ├── payloads/
+    │   └── worm_agent.py        # Self-propagating worm agent
+    ├── modules/
+    │   ├── wifi_attack.py       # WPA2/WEP/WPS/evil-twin attacks
+    │   ├── iot_attack.py        # IoT scanning, RTSP, MQTT, Modbus, ROS
+    │   ├── zero_click.py        # IPv6 RA, WPAD, SMB relay, mDNS poison
+    │   ├── byovd.py             # BYOVD kernel R/W (RTCore64, dbutil, mhyprot2)
+    │   ├── defender_kill.py     # 6-layer EDR/AV elimination
+    │   ├── net_exploits.py      # Network CVE exploits
+    │   └── web_exploits.py      # Web CVE exploits
+    ├── kernel/
+    │   └── exploits/
+    │       ├── clfs_lpe.c       # CVE-2023-28252 CLFS UAF LPE
+    │       └── afd_lpe.c        # CVE-2024-38193 AFD UAF LPE
     ├── bitb/
-    │   ├── index.html       # Default BitB page
-    │   └── themes/          # facebook / google / julazone / outlook
+    │   ├── index.html           # BitB phishing page
+    │   └── themes/              # facebook / google / outlook
     ├── mitm/
-    │   ├── intercept.py     # mitmproxy JS keylogger injector
-    │   └── catcher.py       # Keystroke/credential catcher server
+    │   ├── intercept.py         # mitmproxy JS keylogger injector
+    │   └── catcher.py           # Credential catcher server
     └── logs/
         ├── credentials.txt
-        ├── loot/            # Screenshots, webcam captures, exfiltrated files
+        ├── loot/                # Screenshots, webcam, exfil files
         └── mitm/
 ```
 
@@ -64,157 +83,155 @@ Keylogger/
 
 Access at `http://localhost:8888/panel` (or via tunnel URL).
 
-### Tabs
-
 | Tab | Function |
 |-----|----------|
-| **Agents** | All connected agents — click row to select |
+| **Agents** | All connected agents |
 | **Command** | Send commands + quick-action buttons |
-| **Output** | Live results, screenshots, webcam images |
-| **Credentials** | Captured logins from portal/BitB/keylogger |
-| **Loot Gallery** | Screenshots, webcam photos, exfiltrated files |
-| **Worm Family** | Live view of all worm instances + spread activity |
-| **Worm Control** | Remote control all worm spreading vectors |
+| **Output** | Live results, screenshots, webcam |
+| **Credentials** | Captured logins |
+| **Loot Gallery** | Screenshots, webcam, exfiltrated files |
+| **Worm Family** | Live worm instances + spread activity |
+| **Worm Control** | Remote control all spread vectors |
 
 ### Agent Commands
 
 ```
 RECON           — system info, network, env vars
 SYSINFO         — full system dump
-SCREENSHOT      — capture screen → loot gallery
-WEBCAM          — capture webcam photo → loot gallery
-CLIPBOARD       — grab clipboard contents
+SCREENSHOT      — capture screen
+WEBCAM          — capture webcam photo
+CLIPBOARD       — grab clipboard
 KEYLOG_START    — start keylogger thread
-KEYLOG_DUMP     — flush captured keystrokes
-PERSIST         — reinstall persistence mechanisms
+KEYLOG_DUMP     — flush keystrokes
+PERSIST         — reinstall persistence
 PRIVESC         — check sudo/SUID/capabilities
 HASHDUMP        — dump /etc/shadow or SAM hashes
-SSHKEYS         — harvest all SSH private keys
-BROWSERS        — dump cookies, localStorage, saved passwords
+SSHKEYS         — harvest SSH private keys
+BROWSERS        — dump cookies, saved passwords
 NETWORK         — interfaces, routes, open ports
-DRIVES          — list removable drives
 EXFIL           — auto-exfiltrate documents/keys/configs
-SPREAD          — spread to connected USB drives now
-SSH_TARGETS     — list SSH targets from known_hosts/history
-NET_SCAN        — scan local /24 for live SSH hosts
-SSH_SPRAY       — password spray live SSH hosts
+SPREAD          — spread to USB drives now
+SSH_TARGETS     — list SSH targets from known_hosts
+NET_SCAN        — scan /24 for live SSH hosts
+SSH_SPRAY       — password spray SSH hosts
 SMB_SCAN        — find writable SMB shares
 NET_MOUNTS      — infect mounted network shares
-GIT_POISON      — inject post-commit hooks in git repos
-EMAIL_SPREAD    — send phishing emails to harvested contacts
-DOCKER_ESCAPE   — escape Docker container to host
+GIT_POISON      — inject post-commit git hooks
+EMAIL_SPREAD    — phishing emails to harvested contacts
+DOCKER_ESCAPE   — escape Docker to host
 CLEAN           — wipe agent logs
 SELFDESTRUCT    — wipe persistence + self-delete
 GETFILE <path>  — exfiltrate a specific file
+
+# WiFi commands (via worm agent)
+WIFI_SCAN                      — scan for nearby APs
+WIFI_CRACK <bssid> [iface]     — PMKID/handshake crack
+WIFI_DEAUTH <bssid> [count]    — deauth clients
+WIFI_EVIL_TWIN <ssid> [ch]     — rogue AP + captive portal
+
+# IoT commands (via worm agent)
+IOT_SCAN                       — full subnet IoT discovery
+IOT_AUTO [subnet]              — auto-attack all found devices
+IOT_CAM <ip>                   — RTSP brute + ONVIF probe
+IOT_MQTT <ip> [topic] [msg]    — MQTT anonymous probe/publish
+IOT_CVE <cve> <ip>             — run specific CVE exploit
+IOT_MODBUS <ip> [write <r> <v>]— read/write Modbus registers
+IOT_ROS <ip> [inject <l> <a>]  — enumerate/control ROS robot
+
+# Exploit commands
+NET_EXPLOIT <name> <target>    — network CVE (zerologon, log4shell, etc.)
+WEB_EXPLOIT <name> <target>    — web CVE (log4shell_web, follina, etc.)
+EXPLOIT_SCAN <subnet>          — scan subnet for all CVEs
+BYOVD [driver_path]            — kernel R/W via vulnerable driver
+KILL_DEFENDER [driver_path]    — 6-layer EDR elimination
+ZERO_CLICK <technique> [iface] — zero-interaction compromise
 ```
 
 ---
 
-## Worm Agent
+## WiFi Attack Module
 
-### Spreading Vectors (8 total)
+```bash
+bash start wifi
+```
+
+| Option | Technique |
+|--------|-----------|
+| Auto-attack | Scan → PMKID → handshake → crack |
+| Scan | Passive AP scan |
+| PMKID | No client needed — modern WPA2 |
+| Handshake | Deauth + capture + aircrack/hashcat |
+| Deauth flood | Kick all clients from AP |
+| WEP crack | IV collection + aircrack-ng |
+| WPS brute | Reaver PIN attack |
+| Evil twin AP | Rogue AP + captive portal credential capture |
+| Crack .cap | Crack existing handshake file |
+
+**Note:** Requires a dedicated second USB WiFi adapter (e.g. Alfa AWUS036ACH) — using the primary adapter kills your internet connection.
+
+---
+
+## IoT Attack Module
+
+```bash
+bash start iot
+```
+
+Coverage: IP cameras (RTSP/ONVIF), smart bulbs (Hue/LIFX/Tuya), MQTT brokers, industrial (Modbus/CoAP), robots (ROS/ROS2), UPnP, default credential brute-force (76 pairs), CVEs for Hikvision / TP-Link / Tenda / Netgear / AXIS / Dahua / Geutebruck.
+
+---
+
+## Kernel Exploits
+
+Cross-compiled with MinGW for Windows targets:
+
+```bash
+x86_64-w64-mingw32-gcc -O2 -w op/kernel/exploits/clfs_lpe.c -lpsapi -o clfs_lpe.exe
+x86_64-w64-mingw32-gcc -O2 -w op/kernel/exploits/afd_lpe.c -lws2_32 -lpsapi -o afd_lpe.exe
+```
+
+| CVE | Target | Technique |
+|-----|--------|-----------|
+| CVE-2023-28252 | Win10/11, Server 2019/2022 | CLFS UAF → token steal |
+| CVE-2024-38193 | Win10/11, Server 2019/2022 | AFD UAF → token steal |
+
+---
+
+## Worm Spreading Vectors
 
 | Vector | Method |
 |--------|--------|
-| USB | LNK folder lures + fast-deploy VBS + autorun.inf |
-| SSH Keys | Spread to known_hosts targets using harvested keys |
-| SSH Scan | Scan /24 subnet + spread via SSH keys |
-| SSH Spray | Password spray with 80 harvested + common passwords |
-| SMB | Write to writable Windows shares via smbclient |
-| Net Mounts | Infect CIFS/NFS mounts from /proc/mounts |
-| Docker | Escape container via /proc/1/root + privileged mount |
-| Git Hooks | Inject post-commit hooks in local git repos |
-| Email | Harvest contacts + send phishing with worm attached |
-
-### Worm Control Commands
-
-```
-WORM_STATUS              — dump all flags, skip list, spread log, C2 URL
-WORM_PAUSE               — freeze all threads (keeps polling every 5s)
-WORM_RESUME              — unfreeze
-WORM_STOP_SPREAD         — master off (agent still runs + polls)
-WORM_START_SPREAD        — master on
-WORM_SPREAD_NOW          — force immediate spread cycle (bypass timer)
-
-WORM_USB_ON / OFF        — USB drive infection
-WORM_SSH_ON / OFF        — SSH key + scan spreading
-WORM_SPRAY_ON / OFF      — SSH password spray
-WORM_SMB_ON / OFF        — SMB share infection
-WORM_EMAIL_ON / OFF      — email phishing spread
-WORM_NETMOUNT_ON / OFF   — network mount infection
-WORM_DOCKER_ON / OFF     — Docker escape vector
-WORM_GIT_ON / OFF        — git hook poisoning
-
-WORM_SKIP <host>         — add host/IP to permanent skip list
-WORM_CLEAR_SKIP          — clear the skip list
-WORM_CLEAR_LOG           — forget all spread history (will re-attempt)
-WORM_LIST_TARGETS        — show spread log + skip list
-WORM_SET_INTERVAL <n>    — change poll interval (seconds, min 3)
-WORM_SET_C2 <url>        — hot-swap C2 URL without restart
-```
-
-### Worm agent IDs start with `w` — visible in pink in the panel.
-
----
-
-## USB Drive (Dual-Purpose)
-
-The CHARLIEKIRK USB is configured for **two simultaneous use cases**:
-
-### Operator Mode
-```bash
-bash /media/.../run.sh
-```
-Installs operator kill-switch token (`~/.op_token`) then launches the full toolkit.
-
-### Victim Mode (auto-deploy on plug-in)
-- **Windows**: Victim sees folder lures (`Documents`, `Photos`, `Work Files`, `Backup`)
-  - Click any → VBS fires, copies worm to `%APPDATA%`, adds registry Run key, launches silently
-  - Older systems: `autorun.inf` triggers without any click
-- **Linux**: `Documents.desktop` → worm copies to `~/.local/share/` and runs in background
-
-Hidden files: `.cache/update.py` (baked worm) + `.cache/deploy.vbs` — auto-hidden via `attrib +h +s` after first victim execution.
+| USB | LNK lures + VBS deploy + autorun.inf |
+| SSH Keys | Spread via harvested private keys |
+| SSH Scan | Scan /24 + spread via SSH |
+| SSH Spray | Password spray (80 passwords) |
+| SMB | Write to writable Windows shares |
+| Net Mounts | Infect CIFS/NFS from /proc/mounts |
+| Docker | Escape via /proc/1/root |
+| Git Hooks | Inject post-commit hooks |
+| Email | Phishing with worm attached |
 
 ---
 
 ## Operator Kill-Switch
 
-The worm checks for a secret token before running. If found, it exits silently — your machine is never infected.
+The worm exits silently if the operator token is present on the machine:
 
-**Token:** `1bff231c9f73c3232858a913ba393bfcf7573aa5324e67d8`
-
-Install on any operator machine:
 ```bash
 echo "1bff231c9f73c3232858a913ba393bfcf7573aa5324e67d8" > ~/.op_token
 ```
 
-`run.sh` on the USB does this automatically.
-
 ---
 
-## Delivery Methods
+## C2 Server
 
-| Method | File | Target |
-|--------|------|--------|
-| Portal phishing | `/banner` (served by C2) | All browsers |
-| BitB overlay | `/op/bitb/index.html` | Desktop browsers |
-| HTA dropper | `SecureCertUpdate.hta` | Windows (double-click) |
-| PowerShell | `agent.ps1` | Windows (run as admin) |
-| USB lures | `.cache/deploy.vbs` | Windows auto-run |
-| Email attachment | `worm_agent.py` | Python-capable targets |
-
----
-
-## C2 Server Environment Variables
-
-```bash
-C2_PORT=8888          # Panel port (default 8888)
-AGENT_PORT=4444       # TCP agent listener
-LOG_DIR=./op/logs     # Logs + loot directory
-PAYLOAD_DIR=./op/payloads  # Served payload files
-```
-
-Launch:
 ```bash
 LOG_DIR=./op/logs PAYLOAD_DIR=./op/payloads python3 op/c2/c2_server.py
 ```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `C2_PORT` | 8888 | Panel + HTTP agent port |
+| `AGENT_PORT` | 4444 | TCP raw agent listener |
+| `LOG_DIR` | ./op/logs | Logs + loot directory |
+| `PAYLOAD_DIR` | ./op/payloads | Served payload files |
