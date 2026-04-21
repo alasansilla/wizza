@@ -98,24 +98,53 @@ log() { echo "[$(date '+%H:%M:%S')] $1" >> "$LOG"; }
 # This makes /tmp/start fully self-contained — no other files
 # ══════════════════════════════════════════════════════════════
 # ── Auto-start C2 if not already running ─────────────────────
+# Reads actual port from $OP/logs/c2_ports.txt (written by c2_server.py)
+# C2 auto-selects a free port in range 8888–8938 if preferred is busy
 ensure_c2() {
-    if ss -tlnp 2>/dev/null | grep -q ":${C2_PORT:-8888} "; then
-        ok "C2 already running on :${C2_PORT:-8888}"
+    local _ports_file="$OP/logs/c2_ports.txt"
+    local _port="${C2_PORT:-8888}"
+
+    # Read actual port if c2 was previously started with a different port
+    if [ -f "$_ports_file" ]; then
+        _port=$(grep "^C2_PORT=" "$_ports_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
+        [ -z "$_port" ] && _port="${C2_PORT:-8888}"
+    fi
+
+    # Check if already running on any port in range 8888-8938
+    local _running_port
+    _running_port=$(ss -tlnp 2>/dev/null | grep -oE ':(88[0-9]{2}|89[0-3][0-9]) ' | tr -d ': ' | head -1)
+
+    if [ -n "$_running_port" ]; then
+        ok "C2 already running on :$_running_port"
+        C2_ACTIVE_PORT="$_running_port"
         return
     fi
-    info "Starting C2 server on :${C2_PORT:-8888}..."
+
+    info "Starting C2 server (will auto-select free port from 8888)..."
+    mkdir -p "$OP/logs"
     LOG_DIR="$OP/logs" PAYLOAD_DIR="$OP/payloads" \
         nohup python3 "$C2_DIR/c2_server.py" > "$OP/logs/c2_auto.log" 2>&1 &
     C2_PID=$!
-    sleep 3
-    if ss -tlnp 2>/dev/null | grep -q ":${C2_PORT:-8888} "; then
-        ok "C2 started — panel: ${W}http://localhost:${C2_PORT:-8888}/panel${N}"
-        # Open panel in browser if display available
+
+    # Wait up to 8s for it to bind and write ports file
+    local _i
+    for _i in $(seq 1 8); do
+        sleep 1
+        if [ -f "$_ports_file" ]; then
+            _port=$(grep "^C2_PORT=" "$_ports_file" | cut -d= -f2 | tr -d '[:space:]')
+            [ -n "$_port" ] && break
+        fi
+    done
+
+    C2_ACTIVE_PORT="${_port:-8888}"
+    if ss -tlnp 2>/dev/null | grep -q ":$C2_ACTIVE_PORT "; then
+        ok "C2 started on :$C2_ACTIVE_PORT — panel: ${W}http://localhost:$C2_ACTIVE_PORT/panel${N}"
         if [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; then
-            xdg-open "http://localhost:${C2_PORT:-8888}/panel" 2>/dev/null &
+            xdg-open "http://localhost:$C2_ACTIVE_PORT/panel" 2>/dev/null &
         fi
     else
         warn "C2 failed to start — check $OP/logs/c2_auto.log"
+        tail -3 "$OP/logs/c2_auto.log" 2>/dev/null
     fi
 }
 
