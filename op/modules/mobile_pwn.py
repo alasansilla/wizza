@@ -359,16 +359,17 @@ def rogue_dns(attacker_ip, portal_ip=None, upstream="8.8.8.8"):
                 sock.sendto(reply.pack(), addr)
                 continue
 
-            # Forward to upstream
+            # Forward to upstream — always close fwd socket even on error
+            fwd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
-                fwd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 fwd.settimeout(3)
                 fwd.sendto(data, (upstream, 53))
                 resp, _ = fwd.recvfrom(4096)
-                fwd.close()
                 sock.sendto(resp, addr)
             except Exception:
                 pass
+            finally:
+                fwd.close()
 
     except Exception as e:
         print(f"[DNS ] Error: {e}")
