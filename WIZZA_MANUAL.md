@@ -2581,6 +2581,118 @@ WEB_EXPLOIT bigip_rce <url>
 
 \newpage
 
+# IoT Attack Module (`op/modules/iot_attack.py`)
+
+## Overview
+
+The IoT module targets embedded devices — cameras, routers, PLCs, smart-home hubs, and industrial control systems — both on the local LAN and over the internet.
+
+```bash
+start iot                              # interactive menu (22 options)
+start iot auto [subnet]                # full LAN auto-attack
+start iot external <ip> [apikey]       # single internet-routable target
+start iot shodan <apikey> [query]      # Shodan global discovery
+```
+
+## LAN Attack Flow (auto)
+
+| Phase | What happens |
+|-------|-------------|
+| 1 — SSDP | UPnP multicast — finds routers, NAS, smart TVs |
+| 2 — mDNS | Bonjour/Avahi — reveals device names and types |
+| 3 — Port scan | TCP sweep of all discovered hosts |
+| 4 — Per-device | Default creds, RTSP, MQTT, CoAP, Modbus, CVE sweep |
+
+```bash
+start iot auto 192.168.1.0/24
+```
+
+> SSDP and mDNS use Layer 2 multicast — they only work on the same LAN segment.
+
+## External Attack (`external_attack`)
+
+For internet-routable targets (Shodan results, authorized remote engagements). Skips multicast, goes straight to:
+
+1. TCP port scan across IoT-relevant ports (22, 23, 80, 443, 554, 1883, 502, 5683, 8080, 8883, 37777, …)
+2. Per-service: Telnet/SSH brute, HTTP default creds (with authenticated-content verification), RTSP brute + snapshot, MQTT dump, CoAP, Modbus, ROS
+3. Full CVE sweep: Hikvision, TP-Link, Tenda, Netgear, AXIS, Geutebruck, Dahua — attempted regardless of banner (external devices often hide product names behind reverse proxies)
+4. Optional Shodan enrichment: if `api_key` provided, known open ports and CVEs are fetched first to focus the scan
+
+```bash
+start iot external 203.0.113.45
+start iot external 203.0.113.45 YOUR_SHODAN_KEY   # Shodan enrichment
+```
+
+Results saved to `~/.wizza/logs/wizza_ext_<ip>_<timestamp>.json`.
+
+## Shodan Integration
+
+`shodan_search()` queries the Shodan search API for globally exposed IoT devices.
+
+### Built-in Presets
+
+| Preset | Shodan query |
+|--------|-------------|
+| `cameras` | Hikvision / Dahua / AXIS / has_screenshot |
+| `rtsp` | port:554 RTSP |
+| `mqtt` | port:1883 MQTT |
+| `modbus` | port:502 |
+| `telnet_iot` | port:23 busybox / mirai |
+| `upnp` | port:1900 UPnP IGD |
+| `hikvision` | product:Hikvision |
+| `dahua` | product:Dahua |
+| `tplink` | product:TP-Link |
+| `industrial` | port:502 OR port:47808 OR port:20000 |
+| `routers` | port:80 router admin login |
+
+```bash
+# Menu option [22] or CLI:
+start iot shodan YOUR_KEY cameras DE 200
+#                          ^query  ^country ^limit
+
+# Then pipe results into external attack:
+start iot external <ip_from_results>
+```
+
+### Shodan Host Lookup
+
+Single-IP enrichment — retrieves all known ports, banners, and CVEs from Shodan's database:
+
+```python
+from op.modules.iot_attack import shodan_host
+shodan_host("203.0.113.45", api_key="YOUR_KEY")
+```
+
+### Requirements
+
+```bash
+pip install shodan
+```
+
+A free Shodan account provides ~100 results per query. A paid API key removes rate limits.
+
+## Default Credential Verification
+
+`camera_default_creds()` avoids false positives by verifying response content:
+
+- **Rejects** HTTP 200 responses that contain login-form or failure indicators (`type="password"`, `login failed`, `access denied`, …)
+- **Requires** at least one authenticated-session indicator (`logout`, `dashboard`, `device info`, `firmware`, …)
+- Short non-HTML responses (ONVIF JSON, 204 No Content) pass through as before
+
+## CVE Coverage
+
+| CVE | Target | Module function |
+|-----|--------|----------------|
+| CVE-2021-36260 | Hikvision cameras (pre-auth RCE) | `cve_hikvision_rce` |
+| CVE-2023-1389 | TP-Link Archer AX21 (unauth RCE) | `cve_tplink_rce` |
+| CVE-2020-10987 | Tenda AC router (RCE) | `cve_tenda_rce` |
+| CVE-2021-40847 | Netgear Circle (unauth RCE) | `cve_netgear_rce` |
+| CVE-2018-10660 | AXIS cameras (cmd injection) | `cve_axis_rce` |
+| CVE-2021-33544 | Geutebruck cameras (RCE) | `cve_geutebruck_rce` |
+| — | Dahua DVR/NVR auth bypass + snapshot | `cve_dahua_auth_bypass` |
+
+\newpage
+
 # Appendices
 
 ## Appendix A — Kernel CVE Summary
