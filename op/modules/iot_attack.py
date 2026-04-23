@@ -235,7 +235,12 @@ def scan_subnet(subnet, threads=64, timeout=1.5):
     Fast threaded scan of subnet for IoT-relevant open ports.
     Returns list of {ip, open_ports, services, device_type}.
     """
-    net = ipaddress.ip_network(subnet, strict=False)
+    try:
+        net = ipaddress.ip_network(subnet, strict=False)
+    except ValueError:
+        print(f"[!] Invalid subnet: {subnet!r}")
+        print("[!] Use CIDR notation — e.g. 192.168.1.0/24")
+        return []
     results = []
     lock = threading.Lock()
     q = queue.Queue()

@@ -8187,8 +8187,14 @@ cmd_iot() {
             read -rp "  Select [1-20]: " sel
             case "$sel" in
                 1)  read -rp "  Subnet [192.168.1.0/24]: " SN; SN="${SN:-192.168.1.0/24}"
+                    if ! python3 -c "import ipaddress; ipaddress.ip_network('$SN',strict=False)" 2>/dev/null; then
+                        err "Invalid subnet '$SN' — use CIDR notation e.g. 192.168.1.0/24"; break
+                    fi
                     check_root; sudo python3 "$MOD" auto --subnet "$SN" ;;
                 2)  read -rp "  Subnet [192.168.1.0/24]: " SN; SN="${SN:-192.168.1.0/24}"
+                    if ! python3 -c "import ipaddress; ipaddress.ip_network('$SN',strict=False)" 2>/dev/null; then
+                        err "Invalid subnet '$SN' — use CIDR notation e.g. 192.168.1.0/24"; break
+                    fi
                     python3 "$MOD" scan --subnet "$SN" ;;
                 3)  python3 "$MOD" ssdp ;;
                 4)  python3 "$MOD" mdns --duration 15 ;;
