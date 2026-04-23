@@ -613,10 +613,50 @@ def onvif_probe(ip, port=80):
     return None
 
 
+# Keywords that indicate a login/reject page — not an authenticated session
+_LOGIN_PAGE_INDICATORS = [
+    "login failed", "incorrect password", "invalid password",
+    "authentication failed", "wrong password", "access denied",
+    "<form", "type=\"password\"", "type='password'",
+    "name=\"password\"", "name='password'",
+    "id=\"password\"", "id='password'",
+    "forgot password", "enter your password", "enter password",
+    "please log in", "please sign in", "sign in to",
+    "login required", "unauthorized",
+]
+# Keywords that confirm we are looking at an authenticated admin page
+_AUTH_SUCCESS_INDICATORS = [
+    "logout", "log out", "sign out", "signout",
+    "dashboard", "admin panel", "control panel", "management",
+    "channel", "live view", "device info", "system info",
+    "firmware", "reboot", "factory reset",
+    "capabilities", "onvif", "isapi",
+    "welcome,", "welcome ", "logged in",
+]
+
+def _looks_authenticated(body: str) -> bool:
+    """Return True only if body looks like an authenticated admin page."""
+    b = body.lower()
+    # Reject if it looks like a login/error page
+    for kw in _LOGIN_PAGE_INDICATORS:
+        if kw in b:
+            return False
+    # Require at least one authenticated-session keyword
+    for kw in _AUTH_SUCCESS_INDICATORS:
+        if kw in b:
+            return True
+    # For very short or non-HTML responses (e.g. JSON {uid:…}, 204 No Content) assume OK
+    if len(body) < 200 and "<html" not in b:
+        return True
+    return False
+
+
 def camera_default_creds(ip, port=80, https=False):
     """
     Try default credentials against camera HTTP interface.
     Returns (user, pass) if found, else None.
+    Verifies authenticated content to avoid false positives on devices
+    that return HTTP 200 even for unauthenticated / login-error pages.
     """
     proto = "https" if https else "http"
     paths = ["/", "/index.htm", "/doc/page/login.asp",
@@ -628,16 +668,22 @@ def camera_default_creds(ip, port=80, https=False):
                 "Authorization": _basic_auth(user, passwd)
             })
             if code in (200, 201, 204) and code != 401:
-                print(f"[+] Camera login {ip}:{port}  {user}:{passwd}  [{path}]")
-                return user, passwd
-            # Digest auth via curl
+                if _looks_authenticated(body):
+                    print(f"[+] Camera login {ip}:{port}  {user}:{passwd}  [{path}]")
+                    return user, passwd
+            # Digest auth via curl — fetch body too for content check
             if shutil.which("curl"):
-                out = _run(
+                raw = _run(
+                    f"curl -sk --digest -u '{user}:{passwd}' "
+                    f"'{url}'",
+                    capture=True, timeout=5
+                )
+                status = _run(
                     f"curl -sk --digest -u '{user}:{passwd}' "
                     f"-o /dev/null -w '%{{http_code}}' '{url}'",
                     capture=True, timeout=5
                 ).strip()
-                if out in ("200", "201", "204"):
+                if status in ("200", "201", "204") and _looks_authenticated(raw):
                     print(f"[+] Camera login (digest) {ip}:{port}  {user}:{passwd}")
                     return user, passwd
     return None
