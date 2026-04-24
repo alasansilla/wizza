@@ -636,6 +636,8 @@ _AUTH_SUCCESS_INDICATORS = [
 
 def _looks_authenticated(body: str) -> bool:
     """Return True only if body looks like an authenticated admin page."""
+    if not body or not body.strip():
+        return False
     b = body.lower()
     # Reject if it looks like a login/error page
     for kw in _LOGIN_PAGE_INDICATORS:
@@ -646,7 +648,12 @@ def _looks_authenticated(body: str) -> bool:
         if kw in b:
             return True
     # For very short or non-HTML responses (e.g. JSON {uid:…}, 204 No Content) assume OK
+    # but not if they contain explicit error/fail keywords
+    _json_fail = ("error", "fail", "invalid", "unauthorized", "forbidden",
+                  "denied", "wrong", "incorrect", "bad credential")
     if len(body) < 200 and "<html" not in b:
+        if any(kw in b for kw in _json_fail):
+            return False
         return True
     return False
 

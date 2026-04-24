@@ -11,7 +11,7 @@ Architecture:
   3. Firmware flash       — write modified image back to SPI flash
   4. DXE driver payload   — runs before OS loader, installs EFI variable hook or
                             drops a binary to EFI System Partition (ESP)
-  5. ESP dropper          — places agent in \EFI\Microsoft\Boot\ as bootloader shim
+  5. ESP dropper          — places agent in \\EFI\\Microsoft\\Boot\\ as bootloader shim
 
 Research targets (authorized lab use only):
   - Own hardware with SPI programmer or CHIPSEC

