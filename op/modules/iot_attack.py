@@ -1777,7 +1777,151 @@ def shodan_host(ip, api_key):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 15. External single-host attack (internet-routable targets)
+# 15. ZoomEye — free internet-wide IoT discovery
+# ─────────────────────────────────────────────────────────────────────────────
+
+ZOOMEYE_BASE = "https://api.zoomeye.org"
+
+# ZoomEye query presets — same names as Shodan presets for consistency
+ZOOMEYE_PRESETS = {
+    "cameras":      'app:"Hikvision" OR app:"Dahua" OR app:"AXIS" OR app:"webcam"',
+    "rtsp":         'service:"rtsp"',
+    "mqtt":         'service:"mqtt"',
+    "modbus":       'service:"modbus"',
+    "telnet_iot":   'service:"telnet" app:"busybox"',
+    "upnp":         'service:"upnp"',
+    "coap":         'service:"coap"',
+    "hue":          'app:"Philips hue"',
+    "hikvision":    'app:"Hikvision"',
+    "dahua":        'app:"Dahua"',
+    "tplink":       'app:"TP-LINK"',
+    "netgear":      'app:"Netgear"',
+    "routers":      'app:"router" service:"http"',
+    "industrial":   'service:"modbus" OR service:"bacnet" OR service:"dnp3"',
+    "default_creds": 'title:"Login" title:"admin"',
+}
+
+
+def zoomeye_search(query, api_key, limit=100, country=None, page_limit=None):
+    """
+    Search ZoomEye for internet-exposed IoT devices.
+    Free tier: ~10,000 results/month.
+    Returns list of dicts: {ip, port, country, org, app, version, banner, os}.
+    Auth: JWT API key from zoomeye.org profile.
+    """
+    import urllib.request, urllib.parse
+
+    if not api_key:
+        print("[!] No ZoomEye API key — register free at zoomeye.org")
+        return []
+
+    # Expand preset
+    if query in ZOOMEYE_PRESETS:
+        query = ZOOMEYE_PRESETS[query]
+        print(f"[*] ZoomEye preset expanded: {query}")
+
+    if country:
+        query += f' country:"{country}"'
+
+    headers = {
+        "Authorization": f"JWT {api_key}",
+        "Content-Type":  "application/json",
+    }
+
+    results = []
+    page = 1
+    max_pages = page_limit or ((limit // 20) + 1)  # ZoomEye returns 20 per page
+
+    print(f"[*] ZoomEye search: {query!r}  (limit={limit})")
+
+    while len(results) < limit and page <= max_pages:
+        params = urllib.parse.urlencode({"query": query, "page": page})
+        url = f"{ZOOMEYE_BASE}/host/search?{params}"
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode())
+        except Exception as e:
+            print(f"[!] ZoomEye request error (page {page}): {e}")
+            break
+
+        if "error" in data:
+            print(f"[!] ZoomEye API error: {data['error']}")
+            break
+
+        total = data.get("total", 0)
+        if page == 1:
+            print(f"[*] Total matches: {total}  (showing up to {limit})")
+
+        matches = data.get("matches", [])
+        if not matches:
+            break
+
+        for m in matches:
+            ip      = m.get("ip", "")
+            portinfo = m.get("portinfo", {})
+            port    = portinfo.get("port", 0)
+            app     = portinfo.get("app", "")
+            version = portinfo.get("version", "")
+            banner  = portinfo.get("banner", "")[:200]
+            os_     = m.get("system", {}).get("os", "")
+            geoinfo = m.get("geoinfo", {})
+            cc      = geoinfo.get("country", {}).get("short", "")
+            org     = geoinfo.get("organization", "")
+            entry = {
+                "ip": ip, "port": port, "country": cc, "org": org,
+                "app": app, "version": version, "banner": banner, "os": os_,
+            }
+            results.append(entry)
+            print(f"  {ip}:{port}  {cc}  {org}  {app} {version}")
+            if len(results) >= limit:
+                break
+
+        page += 1
+
+    print(f"[*] ZoomEye: {len(results)} results collected")
+    return results
+
+
+def zoomeye_host(ip, api_key):
+    """
+    ZoomEye single-IP host lookup — all known ports/services for that IP.
+    Returns raw ZoomEye host dict or None.
+    """
+    import urllib.request
+
+    if not api_key:
+        print("[!] No ZoomEye API key")
+        return None
+
+    headers = {"Authorization": f"JWT {api_key}"}
+    url = f"{ZOOMEYE_BASE}/host/{ip}"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        print(f"[!] ZoomEye host lookup error for {ip}: {e}")
+        return None
+
+    if "error" in data:
+        print(f"[!] ZoomEye error for {ip}: {data['error']}")
+        return None
+
+    print(f"\n[*] ZoomEye host info: {ip}")
+    geoinfo = data.get("geoinfo", {})
+    print(f"    Country:  {geoinfo.get('country', {}).get('names', {}).get('en', '?')}")
+    print(f"    City:     {geoinfo.get('city', {}).get('names', {}).get('en', '?')}")
+    print(f"    Org:      {geoinfo.get('organization', '?')}")
+    print(f"    ASN:      {geoinfo.get('asn', '?')}")
+    for svc in data.get("data", []):
+        pi = svc.get("portinfo", {})
+        print(f"    [{pi.get('port')}] {pi.get('app','')} {pi.get('version','')}  {pi.get('banner','')[:100]}")
+    return data
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 16. External single-host attack (internet-routable targets)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Ports to probe on external IoT targets (no LAN-only ports like mDNS 5353)
@@ -1788,21 +1932,34 @@ EXTERNAL_IOT_PORTS = [
 ]
 
 
-def external_attack(ip, ports=None, out_dir="/tmp", api_key=None):
+def external_attack(ip, ports=None, out_dir="/tmp", api_key=None, zoomeye_key=None):
     """
     Full IoT attack against a single internet-routable IP.
     Skips multicast-only steps (SSDP/mDNS) which require LAN.
-    If api_key is provided, enriches with Shodan host info first.
+    If api_key provided: Shodan enrichment.
+    If zoomeye_key provided: ZoomEye enrichment (free tier).
     """
     print(f"\n[*] WiZZA External IoT Attack: {ip}")
     result = {"ip": ip, "findings": [], "ports": []}
+
+    # Optional: ZoomEye enrichment (free)
+    if zoomeye_key:
+        host_info = zoomeye_host(ip, zoomeye_key)
+        if host_info:
+            result["zoomeye"] = host_info
+            zy_ports = set()
+            for svc in host_info.get("data", []):
+                p = svc.get("portinfo", {}).get("port")
+                if p:
+                    zy_ports.add(int(p))
+            if zy_ports:
+                print(f"[*] ZoomEye known ports: {sorted(zy_ports)}")
 
     # Optional: Shodan enrichment
     if api_key:
         host_info = shodan_host(ip, api_key)
         if host_info:
             result["shodan"] = host_info
-            # Use Shodan's known open ports to speed up targeted checks
             shodan_ports = set(host_info.get("ports", []))
             if shodan_ports:
                 print(f"[*] Shodan known ports: {sorted(shodan_ports)}")
@@ -1967,6 +2124,8 @@ def run(action, **kwargs):
         "external":     external_attack,
         "shodan":       shodan_search,
         "shodan_host":  shodan_host,
+        "zoomeye":      zoomeye_search,
+        "zoomeye_host": zoomeye_host,
     }
     if action not in actions:
         print(f"[!] Unknown action: {action}")
@@ -1987,10 +2146,11 @@ if __name__ == "__main__":
     p.add_argument("--out",     default="/tmp")
     p.add_argument("--duration", type=int, default=30)
     p.add_argument("--cmd",     default="id")
-    p.add_argument("--query",   default="cameras")
-    p.add_argument("--apikey",  default="")
-    p.add_argument("--limit",   type=int, default=100)
-    p.add_argument("--country", default=None)
+    p.add_argument("--query",      default="cameras")
+    p.add_argument("--apikey",     default="")
+    p.add_argument("--zoomeyekey", default="")
+    p.add_argument("--limit",      type=int, default=100)
+    p.add_argument("--country",    default=None)
     args = p.parse_args()
 
     ip = args.ip or args.subnet.split("/")[0].rsplit(".",1)[0] + ".1"
@@ -2033,7 +2193,9 @@ if __name__ == "__main__":
         if not args.ip:
             print("[!] --ip required for external attack")
         else:
-            external_attack(args.ip, out_dir=args.out, api_key=args.apikey or None)
+            external_attack(args.ip, out_dir=args.out,
+                            api_key=args.apikey or None,
+                            zoomeye_key=args.zoomeyekey or None)
     elif args.action == "shodan":
         shodan_search(args.query, args.apikey, limit=args.limit, country=args.country)
     elif args.action == "shodan_host":
@@ -2041,5 +2203,12 @@ if __name__ == "__main__":
             print("[!] --ip required for shodan_host")
         else:
             shodan_host(args.ip, args.apikey)
+    elif args.action == "zoomeye":
+        zoomeye_search(args.query, args.zoomeyekey, limit=args.limit, country=args.country)
+    elif args.action == "zoomeye_host":
+        if not args.ip:
+            print("[!] --ip required for zoomeye_host")
+        else:
+            zoomeye_host(args.ip, args.zoomeyekey)
     else:
         print(f"Unknown action: {args.action}")

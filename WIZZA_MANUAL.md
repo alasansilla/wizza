@@ -2671,6 +2671,27 @@ pip install shodan
 
 A free Shodan account provides ~100 results per query. A paid API key removes rate limits.
 
+## ZoomEye Integration (Free)
+
+ZoomEye is a free alternative to Shodan — **10,000 results/month** on the free tier, no credit card required.
+
+Register at `zoomeye.org` → profile → API key.
+
+```bash
+# Menu option [23] or CLI:
+start iot zoomeye YOUR_KEY hikvision DE 200
+
+# Then attack results:
+start iot external <ip_from_results> "" YOUR_ZOOMEYE_KEY
+
+# ZoomEye + external_attack combined (ZoomEye enriches the port scan):
+python3 op/modules/iot_attack.py external --ip <ip> --zoomeyekey YOUR_KEY
+```
+
+Same presets as Shodan: `cameras`, `rtsp`, `mqtt`, `modbus`, `hikvision`, `tplink`, `industrial`, etc.
+
+`zoomeye_host(ip, key)` fetches all known ports/services/banners for a single IP from ZoomEye's database — used automatically by `external_attack` when `zoomeye_key` is provided.
+
 ## Default Credential Verification
 
 `camera_default_creds()` avoids false positives by verifying response content:
