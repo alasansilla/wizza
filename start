@@ -4353,6 +4353,7 @@ cmd_help() {
     echo -e "  ${C}bash start iot external <ip> [shodan_key] [zoomeye_key]${N}  Full attack on internet-routable IP"
     echo -e "  ${C}bash start iot shodan <apikey> [query] [country] [limit]${N}  Shodan IoT search"
     echo -e "  ${C}bash start iot zoomeye <apikey> [query] [country] [limit]${N} ZoomEye IoT search (free)"
+    echo -e "  ${C}bash start iot fofa <email> <apikey> [query] [country] [limit]${N} FOFA IoT search (free, no verify)"
     echo ""
     echo -e "  ${Y}━━━ WIFI ATTACKS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
     echo -e "  ${C}bash start wifi${N}          Interactive WiFi attack menu"
@@ -8191,8 +8192,9 @@ cmd_iot() {
             echo -e "  ${W}[21]${N} External single-host attack  (internet-routable IP, full CVE sweep)"
             echo -e "  ${W}[22]${N} Shodan search               (find exposed devices globally)"
             echo -e "  ${W}[23]${N} ZoomEye search              (free — 10k results/month)"
+            echo -e "  ${W}[24]${N} FOFA search                 (free — 100 results/query, no verification)"
             echo ""
-            read -rp "  Select [1-23]: " sel
+            read -rp "  Select [1-24]: " sel
             case "$sel" in
                 1)  read -rp "  Subnet [192.168.1.0/24]: " SN; SN="${SN:-192.168.1.0/24}"
                     if ! python3 -c "import ipaddress; ipaddress.ip_network('$SN',strict=False)" 2>/dev/null; then
@@ -8271,12 +8273,19 @@ cve_geutebruck_rce('$IP')
                     read -rp "  Country filter (e.g. DE, US — Enter for all): " CC
                     read -rp "  Result limit [100]: " LIM; LIM="${LIM:-100}"
                     python3 "$MOD" shodan --apikey "$SKEY" --query "$QRY" --limit "$LIM" ${CC:+--country "$CC"} ;;
-                23) read -rp "  ZoomEye API key (free at zoomeye.org): " ZKEY
+                23) read -rp "  ZoomEye API key (free at zoomeye.ai): " ZKEY
                     echo -e "  Presets: cameras rtsp mqtt modbus telnet_iot upnp hikvision dahua tplink routers industrial"
                     read -rp "  Query or preset [cameras]: " QRY; QRY="${QRY:-cameras}"
                     read -rp "  Country filter (e.g. DE, US — Enter for all): " CC
                     read -rp "  Result limit [100]: " LIM; LIM="${LIM:-100}"
                     python3 "$MOD" zoomeye --zoomeyekey "$ZKEY" --query "$QRY" --limit "$LIM" ${CC:+--country "$CC"} ;;
+                24) read -rp "  FOFA email: " FEMAIL
+                    read -rp "  FOFA API key (free at fofa.info): " FKEY
+                    echo -e "  Presets: cameras rtsp mqtt modbus telnet_iot upnp hikvision dahua tplink routers industrial"
+                    read -rp "  Query or preset [cameras]: " QRY; QRY="${QRY:-cameras}"
+                    read -rp "  Country filter (e.g. DE, US — Enter for all): " CC
+                    read -rp "  Result limit [100]: " LIM; LIM="${LIM:-100}"
+                    python3 "$MOD" fofa --fofaemail "$FEMAIL" --fofakey "$FKEY" --query "$QRY" --limit "$LIM" ${CC:+--country "$CC"} ;;
             esac
             ;;
 
@@ -8353,6 +8362,16 @@ cve_geutebruck_rce('$IP')
             LIM="${5:-100}"
             echo -e "${Y}[*] ZoomEye: $QRY${N}"
             python3 "$MOD" zoomeye --zoomeyekey "$TARGET" --query "$QRY" --limit "$LIM" ${CC:+--country "$CC"}
+            ;;
+        fofa)
+            [[ -z "$TARGET" ]] && { err "Usage: start iot fofa <email> <apikey> [query] [country] [limit]"; return; }
+            FKEY="${EXTRA1:-}"
+            [[ -z "$FKEY" ]] && { err "Usage: start iot fofa <email> <apikey> [query] [country] [limit]"; return; }
+            QRY="${EXTRA2:-cameras}"
+            CC="${5:-}"
+            LIM="${6:-100}"
+            echo -e "${Y}[*] FOFA: $QRY${N}"
+            python3 "$MOD" fofa --fofaemail "$TARGET" --fofakey "$FKEY" --query "$QRY" --limit "$LIM" ${CC:+--country "$CC"}
             ;;
         *)
             echo "Usage: start iot [auto|scan|rtsp|mqtt|hue|ros|hikvision|tplink|modbus|ssdp|mdns|lifx|external|shodan|zoomeye] [target]"

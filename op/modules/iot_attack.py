@@ -1780,7 +1780,7 @@ def shodan_host(ip, api_key):
 # 15. ZoomEye — free internet-wide IoT discovery
 # ─────────────────────────────────────────────────────────────────────────────
 
-ZOOMEYE_BASE = "https://api.zoomeye.org"
+ZOOMEYE_BASE = "https://api.zoomeye.ai"
 
 # ZoomEye query presets — same names as Shodan presets for consistency
 ZOOMEYE_PRESETS = {
@@ -1921,7 +1921,112 @@ def zoomeye_host(ip, api_key):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 16. External single-host attack (internet-routable targets)
+# 16. FOFA — free internet-wide IoT discovery (fofa.info)
+# ─────────────────────────────────────────────────────────────────────────────
+
+FOFA_BASE = "https://fofa.info"
+
+# FOFA uses app="..." syntax (not product:)
+FOFA_PRESETS = {
+    "cameras":      'app="Hikvision" || app="Dahua" || app="AXIS" || title="webcam"',
+    "rtsp":         'protocol="rtsp"',
+    "mqtt":         'protocol="mqtt"',
+    "modbus":       'protocol="modbus"',
+    "telnet_iot":   'protocol="telnet" && body="busybox"',
+    "upnp":         'protocol="upnp"',
+    "coap":         'protocol="coap"',
+    "hue":          'app="Philips Hue"',
+    "hikvision":    'app="Hikvision"',
+    "dahua":        'app="Dahua"',
+    "tplink":       'app="TP-LINK"',
+    "netgear":      'app="Netgear"',
+    "routers":      'title="router" && title="login"',
+    "industrial":   'protocol="modbus" || protocol="bacnet" || protocol="dnp3"',
+    "default_creds": 'title="admin" && title="login"',
+}
+
+
+def fofa_search(query, email, api_key, limit=100, country=None):
+    """
+    Search FOFA for internet-exposed IoT devices.
+    Free tier: 10 queries/day, up to 100 results per query.
+    Register free at fofa.info — no email verification required.
+    Returns list of dicts: {ip, port, country, org, host, banner, product, version}.
+    """
+    import urllib.request, urllib.parse, base64
+
+    if not api_key or not email:
+        print("[!] FOFA requires email + API key — register free at fofa.info")
+        return []
+
+    # Expand preset
+    if query in FOFA_PRESETS:
+        query = FOFA_PRESETS[query]
+        print(f"[*] FOFA preset expanded: {query}")
+
+    if country:
+        query += f' && country="{country}"'
+
+    print(f"[*] FOFA search: {query!r}  (limit={limit})")
+
+    results = []
+    page = 1
+    fields = "ip,port,country,org,host,banner,product,version,os"
+
+    while len(results) < limit:
+        q_b64 = base64.b64encode(query.encode()).decode()
+        size  = min(100, limit - len(results))
+        params = urllib.parse.urlencode({
+            "email":   email,
+            "key":     api_key,
+            "qbase64": q_b64,
+            "size":    size,
+            "page":    page,
+            "fields":  fields,
+        })
+        url = f"{FOFA_BASE}/api/v1/search/all?{params}"
+        try:
+            with urllib.request.urlopen(url, timeout=15) as resp:
+                data = json.loads(resp.read().decode())
+        except Exception as e:
+            print(f"[!] FOFA request error (page {page}): {e}")
+            break
+
+        if data.get("error"):
+            print(f"[!] FOFA API error: {data.get('errmsg', data)}")
+            break
+
+        if page == 1:
+            print(f"[*] Total matches: {data.get('size', '?')}")
+
+        rows = data.get("results", [])
+        if not rows:
+            break
+
+        field_list = fields.split(",")
+        for row in rows:
+            entry = dict(zip(field_list, row))
+            results.append(entry)
+            ip      = entry.get("ip", "")
+            port    = entry.get("port", "")
+            cc      = entry.get("country", "")
+            org     = entry.get("org", "")
+            product = entry.get("product", "")
+            version = entry.get("version", "")
+            print(f"  {ip}:{port}  {cc}  {org}  {product} {version}")
+            if len(results) >= limit:
+                break
+
+        if len(rows) < size:
+            break
+        page += 1
+
+    print(f"[*] FOFA: {len(results)} results collected")
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 17. External single-host attack (internet-routable targets)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Ports to probe on external IoT targets (no LAN-only ports like mDNS 5353)
@@ -2126,6 +2231,7 @@ def run(action, **kwargs):
         "shodan_host":  shodan_host,
         "zoomeye":      zoomeye_search,
         "zoomeye_host": zoomeye_host,
+        "fofa":         fofa_search,
     }
     if action not in actions:
         print(f"[!] Unknown action: {action}")
@@ -2149,6 +2255,8 @@ if __name__ == "__main__":
     p.add_argument("--query",      default="cameras")
     p.add_argument("--apikey",     default="")
     p.add_argument("--zoomeyekey", default="")
+    p.add_argument("--fofaemail",  default="")
+    p.add_argument("--fofakey",    default="")
     p.add_argument("--limit",      type=int, default=100)
     p.add_argument("--country",    default=None)
     args = p.parse_args()
@@ -2210,5 +2318,8 @@ if __name__ == "__main__":
             print("[!] --ip required for zoomeye_host")
         else:
             zoomeye_host(args.ip, args.zoomeyekey)
+    elif args.action == "fofa":
+        fofa_search(args.query, args.fofaemail, args.fofakey,
+                    limit=args.limit, country=args.country)
     else:
         print(f"Unknown action: {args.action}")
