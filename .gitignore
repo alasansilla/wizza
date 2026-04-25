@@ -21,3 +21,4 @@ __pycache__/
 # PDF (regenerate locally)
 SETUP.pdf
 make_pdf.py
+*.png
