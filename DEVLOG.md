@@ -37,12 +37,26 @@ Windows Defender was blocking the payload chain. Did a full analysis and applied
 ### Commit
 `9103d17` — fix: 4-layer Defender bypass improvements for VM test
 
-### What Was NOT Done Yet (NEXT STEP)
-- [ ] Rebake the payload: run `bash start` → choose payload → HTA dropper
-- [ ] Copy baked files to `/home/heilige/TRANSFER/` (or shared folder with VM)
-- [ ] Test on WiZZA-Win11 VM — check `%TEMP%\.wdbg` on the VM for debug output
-- [ ] If Defender still catches: check WHICH step fails (on-access scan of .proj file, AMSI inside PS, or persistence step)
-- [ ] Update `TRANSFER/OneDriveSetup.proj` with newly baked .proj once test passes
+### VM Test Status (2026-04-30)
+- [x] Worm runs on VM — AMSI bypassed, persistence installed (`syncdat=True`)
+- [x] Agent connects to C2 — confirmed via panel
+- [x] Fixed: bake pipeline was using wrong source (`op/victim/` not `op/payloads/`)
+- [x] Fixed: wrong C2 IP baked (WiFi 10.x instead of VirtualBox 192.168.56.1)
+- [x] Fixed: 5-step self-verifying bake with live checks at each step
+- [ ] Test full worm capabilities: SPREAD_USB, SPREAD_LAN, LOOT, SCREENSHOT
+- [ ] Verify persistence survives reboot (COM task + registry Run key)
+- [ ] Test worm reregistration after C2 restart
+
+### Key Bugs Fixed This Session
+| Bug | Fix |
+|-----|-----|
+| `schtasks.exe` process spawn detected | COM `Schedule.Service` everywhere |
+| Single-byte XOR trivially brute-forced | 8-byte rolling XOR + machine GUID mixing |
+| AMSI bypass 3 methods | Added Method 6 (ScriptBlock logging) + Method 7 (module cache) |
+| bake read from `op/victim/` old template | Synced improved worm to `op/victim/worm_agent.ps1` |
+| IP auto-detected as WiFi, VM couldn't reach | Smart IP: prefers vboxnet0, prompt to override |
+| Bake always used tunnel URL | New option: tunnel vs direct IP at bake time |
+| Monitoring loop bash error line 3455 | Fixed `AC` var null-check |
 
 ### VM Info
 - VM name: `WiZZA-Win11` (saved state as of 2026-04-27 13:49)
