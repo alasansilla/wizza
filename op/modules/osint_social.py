@@ -108,6 +108,36 @@ PLATFORMS = [
     ("Instructables","https://www.instructables.com/member/{u}/",        200, "User Not Found",                  "{u}",                  None),
     ("HackerRank",  "https://www.hackerrank.com/{u}",                    200, "404",                             "{u}",                  "hackerrank"),
     ("LeetCode",    "https://leetcode.com/{u}/",                         200, "404",                             "{u}",                  None),
+    # ── New generation ──────────────────────────────────────────────────────────
+    ("Threads",     "https://www.threads.net/@{u}",                      200, "isn't available",                 "{u}",                  "threads"),
+    ("Bluesky",     "https://bsky.app/profile/{u}",                      200, "Profile not found",               "{u}",                  "bluesky"),
+    ("VSCO",        "https://vsco.co/{u}",                               200, "User Not Found",                  "{u}",                  None),
+    ("Wattpad",     "https://www.wattpad.com/user/{u}",                  200, "404",                             "{u}",                  "wattpad"),
+    ("Dribbble",    "https://dribbble.com/{u}",                          200, "Page not found",                  "{u}",                  None),
+    ("Patreon",     "https://www.patreon.com/{u}",                       200, "404",                             "{u}",                  "patreon"),
+    ("Ko-fi",       "https://ko-fi.com/{u}",                             200, "404",                             "{u}",                  None),
+    ("OnlyFans",    "https://onlyfans.com/{u}",                          200, "404",                             "{u}",                  None),
+    ("Ask.fm",      "https://ask.fm/{u}",                                200, "does not exist",                  "{u}",                  None),
+    ("Poshmark",    "https://poshmark.com/closet/{u}",                   200, "404",                             "{u}",                  None),
+    ("Depop",       "https://www.depop.com/{u}",                         200, "Page not found",                  "{u}",                  None),
+    ("Etsy",        "https://www.etsy.com/shop/{u}",                     200, "Shop Not Found",                  "{u}",                  None),
+    ("DockerHub",   "https://hub.docker.com/u/{u}/",                     200, "404",                             "{u}",                  "dockerhub"),
+    ("npm",         "https://www.npmjs.com/~{u}",                        200, "404",                             "{u}",                  "npm_pkg"),
+    ("PyPI",        "https://pypi.org/user/{u}/",                        200, "404",                             "{u}",                  None),
+    ("HuggingFace", "https://huggingface.co/{u}",                        200, "404",                             "{u}",                  "huggingface"),
+    ("Untappd",     "https://untappd.com/user/{u}",                      200, "404",                             "{u}",                  None),
+    ("CuriousCat",  "https://curiouscat.live/{u}",                       200, "404",                             "{u}",                  None),
+    ("Gab",         "https://gab.com/{u}",                               200, "doesn't exist",                   "{u}",                  None),
+    ("Myspace",     "https://myspace.com/{u}",                           200, "doesn't exist",                   "{u}",                  None),
+    ("Foursquare",  "https://foursquare.com/{u}",                        200, "404",                             "{u}",                  None),
+    ("Blogger",     "https://{u}.blogspot.com",                          200, "not found",                       None,                   None),
+    ("WordPress",   "https://{u}.wordpress.com",                         200, "doesn't exist",                   None,                   None),
+    ("Codecademy",  "https://www.codecademy.com/profiles/{u}",           200, "404",                             "{u}",                  None),
+    ("Codeforces",  "https://codeforces.com/profile/{u}",                200, "not found",                       "{u}",                  "codeforces"),
+    ("AtCoder",     "https://atcoder.jp/users/{u}",                      200, "404",                             "{u}",                  None),
+    ("RateYourMusic","https://rateyourmusic.com/~{u}",                   200, "not found",                       "{u}",                  None),
+    ("Genius",      "https://genius.com/{u}",                            200, "Page not found",                  "{u}",                  None),
+    ("Amino",       "https://aminoapps.com/u/{u}",                       200, "404",                             "{u}",                  None),
 ]
 
 HEADERS = {
@@ -144,7 +174,7 @@ def _re(pattern, text, default=""):
 def _extract_github(username: str, body: str) -> dict:
     try:
         d = json.loads(body)
-        return {
+        base = {
             "display_name":  d.get("name", ""),
             "bio":           d.get("bio", ""),
             "location":      d.get("location", ""),
@@ -153,11 +183,30 @@ def _extract_github(username: str, body: str) -> dict:
             "followers":     d.get("followers", 0),
             "following":     d.get("following", 0),
             "public_repos":  d.get("public_repos", 0),
+            "public_gists":  d.get("public_gists", 0),
             "created_at":    d.get("created_at", ""),
+            "updated_at":    d.get("updated_at", ""),
             "avatar_url":    d.get("avatar_url", ""),
             "blog":          d.get("blog", ""),
             "twitter":       d.get("twitter_username", ""),
+            "hireable":      d.get("hireable", False),
         }
+        _, repos_body = _fetch(f"https://api.github.com/users/{username}/repos?per_page=100&sort=updated")
+        try:
+            repos = json.loads(repos_body)
+            langs = Counter(r.get("language") for r in repos if r.get("language"))
+            top_repos = [r.get("name","") for r in sorted(repos, key=lambda x: x.get("stargazers_count",0), reverse=True)[:6]]
+            base["top_languages"] = ", ".join(l for l, _ in langs.most_common(6))
+            base["top_repos"]     = top_repos
+            base["total_stars"]   = sum(r.get("stargazers_count",0) for r in repos)
+            base["total_forks"]   = sum(r.get("forks_count",0) for r in repos)
+        except: pass
+        _, events_body = _fetch(f"https://api.github.com/users/{username}/events/public?per_page=10")
+        try:
+            evts = json.loads(events_body)
+            base["recent_activity"] = list({e.get("type","") for e in evts if e.get("type")})[:5]
+        except: pass
+        return {k: v for k, v in base.items() if v or v == 0}
     except: return {}
 
 
@@ -507,6 +556,147 @@ def _extract_weibo(username: str, body: str) -> dict:
     }
 
 
+def _extract_threads(username: str, body: str) -> dict:
+    return {
+        "display_name": _re(r'"og:title"\s+content="([^"]+)"', body),
+        "bio":          _re(r'"og:description"\s+content="([^"]+)"', body),
+        "avatar_url":   _re(r'"og:image"\s+content="([^"]+)"', body),
+        "followers":    _re(r'([\d,]+)\s+[Ff]ollower', body).replace(",",""),
+    }
+
+
+def _extract_bluesky(username: str, body: str) -> dict:
+    _, api = _fetch(f"https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor={urllib.parse.quote(username)}")
+    try:
+        d = json.loads(api)
+        return {
+            "display_name": d.get("displayName",""),
+            "bio":          d.get("description",""),
+            "avatar_url":   d.get("avatar",""),
+            "followers":    d.get("followersCount",0),
+            "following":    d.get("followsCount",0),
+            "posts":        d.get("postsCount",0),
+            "did":          d.get("did",""),
+            "created_at":   d.get("createdAt","")[:10],
+        }
+    except:
+        return {
+            "display_name": _re(r'"og:title"\s+content="([^"]+)"', body),
+            "bio":          _re(r'"og:description"\s+content="([^"]+)"', body),
+        }
+
+
+def _extract_wattpad(username: str, body: str) -> dict:
+    return {
+        "display_name": _re(r'"og:title"\s+content="([^"]+)"', body),
+        "bio":          _re(r'"description"\s+content="([^"]+)"', body),
+        "avatar_url":   _re(r'"og:image"\s+content="([^"]+)"', body),
+        "stories":      _re(r'([\d,]+)\s+[Ss]tor', body).replace(",",""),
+        "followers":    _re(r'([\d,]+)\s+[Ff]ollower', body).replace(",",""),
+        "following":    _re(r'[Ff]ollowing[^\d]*([\d,]+)', body).replace(",",""),
+    }
+
+
+def _extract_patreon(username: str, body: str) -> dict:
+    return {
+        "display_name": _re(r'"og:title"\s+content="([^"]+)"', body),
+        "bio":          _re(r'"og:description"\s+content="([^"]+)"', body),
+        "avatar_url":   _re(r'"og:image"\s+content="([^"]+)"', body),
+        "patrons":      _re(r'([\d,]+)\s+[Pp]atron', body).replace(",",""),
+        "category":     _re(r'"category"\s*:\s*"([^"]+)"', body),
+    }
+
+
+def _extract_dockerhub(username: str, body: str) -> dict:
+    _, api = _fetch(f"https://hub.docker.com/v2/users/{username}/")
+    try:
+        d = json.loads(api)
+        base = {
+            "display_name": d.get("full_name",""),
+            "bio":          d.get("bio",""),
+            "location":     d.get("location",""),
+            "company":      d.get("company",""),
+            "joined":       (d.get("date_joined") or "")[:10],
+            "avatar_url":   d.get("gravatar_url",""),
+        }
+        _, repos_api = _fetch(f"https://hub.docker.com/v2/repositories/{username}/?page_size=10")
+        try:
+            repos_d = json.loads(repos_api)
+            base["repos"]       = repos_d.get("count",0)
+            base["top_images"]  = [r.get("name","") for r in repos_d.get("results",[])[:5]]
+            base["total_pulls"] = sum(r.get("pull_count",0) for r in repos_d.get("results",[]))
+        except: pass
+        return {k: v for k, v in base.items() if v or v == 0}
+    except:
+        return {"display_name": _re(r'"og:title"\s+content="([^"]+)"', body)}
+
+
+def _extract_npm_pkg(username: str, body: str) -> dict:
+    _, api = _fetch(f"https://registry.npmjs.org/-/user/org.couchdb.user:{urllib.parse.quote(username)}")
+    try:
+        d = json.loads(api)
+        base = {
+            "display_name": d.get("name",""),
+            "bio":          d.get("description",""),
+            "avatar_url":   d.get("image",""),
+            "email":        d.get("email",""),
+            "website":      d.get("homepage",""),
+            "github":       d.get("github",""),
+            "twitter":      d.get("twitter",""),
+        }
+    except:
+        base = {"display_name": _re(r'"og:title"\s+content="([^"]+)"', body)}
+    _, pkgs_body = _fetch(f"https://registry.npmjs.org/-/v1/search?text=maintainer:{urllib.parse.quote(username)}&size=10")
+    try:
+        pkgs = json.loads(pkgs_body)
+        base["packages"] = [p.get("package",{}).get("name","") for p in pkgs.get("objects",[])[:8]]
+        base["total_packages"] = pkgs.get("total",0)
+    except: pass
+    return {k: v for k, v in base.items() if v or v == 0}
+
+
+def _extract_huggingface(username: str, body: str) -> dict:
+    _, api = _fetch(f"https://huggingface.co/api/users/{username}/overview")
+    try:
+        d = json.loads(api)
+        return {
+            "display_name": d.get("fullname",""),
+            "bio":          d.get("details",""),
+            "avatar_url":   d.get("avatarUrl",""),
+            "followers":    d.get("numFollowers",0),
+            "following":    d.get("numFollowing",0),
+            "models":       d.get("numModels",0),
+            "datasets":     d.get("numDatasets",0),
+            "spaces":       d.get("numSpaces",0),
+        }
+    except:
+        return {
+            "display_name": _re(r'"og:title"\s+content="([^"]+)"', body),
+            "bio":          _re(r'"og:description"\s+content="([^"]+)"', body),
+        }
+
+
+def _extract_codeforces(username: str, body: str) -> dict:
+    _, api = _fetch(f"https://codeforces.com/api/user.info?handles={urllib.parse.quote(username)}")
+    try:
+        d = json.loads(api).get("result",[{}])[0]
+        return {
+            "display_name":  f"{d.get('firstName','')} {d.get('lastName','')}".strip(),
+            "rank":          d.get("rank",""),
+            "max_rank":      d.get("maxRank",""),
+            "rating":        d.get("rating",0),
+            "max_rating":    d.get("maxRating",0),
+            "country":       d.get("country",""),
+            "city":          d.get("city",""),
+            "organization":  d.get("organization",""),
+            "avatar_url":    d.get("titlePhoto",""),
+            "friends":       d.get("friendOfCount",0),
+            "contributions": d.get("contribution",0),
+        }
+    except:
+        return {"display_name": _re(r'"og:title"\s+content="([^"]+)"', body)}
+
+
 EXTRACTORS = {
     "ig":       _extract_ig,
     "twitter":  _extract_twitter,
@@ -529,6 +719,14 @@ EXTRACTORS = {
     "duolingo":    _extract_duolingo,
     "hackerrank":  _extract_hackerrank,
     "weibo":       _extract_weibo,
+    "threads":     _extract_threads,
+    "bluesky":     _extract_bluesky,
+    "wattpad":     _extract_wattpad,
+    "patreon":     _extract_patreon,
+    "dockerhub":   _extract_dockerhub,
+    "npm_pkg":     _extract_npm_pkg,
+    "huggingface": _extract_huggingface,
+    "codeforces":  _extract_codeforces,
 }
 
 
@@ -1195,6 +1393,120 @@ def _infer_timezone(hours: list) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  EMAIL PERMUTATION — guess email from username and verify via Gravatar
+# ══════════════════════════════════════════════════════════════════════════════
+
+def email_permutation_osint(username: str) -> dict:
+    """
+    Guess common email addresses for a username and verify each via Gravatar.
+    Returns {email: {gravatar, display_name, avatar}} for hits.
+    """
+    providers = [
+        "gmail.com", "yahoo.com", "outlook.com", "hotmail.com",
+        "protonmail.com", "icloud.com", "gmx.com", "web.de", "gmx.de",
+        "me.com", "live.com", "msn.com", "ymail.com",
+    ]
+    found = {}
+    for domain in providers:
+        email = f"{username}@{domain}"
+        md5 = hashlib.md5(email.lower().strip().encode()).hexdigest()
+        gst, gbody = _fetch(f"https://www.gravatar.com/{md5}.json")
+        if gst == 200 and '"entry"' in gbody:
+            try:
+                gdata = json.loads(gbody).get("entry",[{}])[0]
+                found[email] = {
+                    "gravatar":     True,
+                    "display_name": gdata.get("displayName",""),
+                    "avatar":       gdata.get("thumbnailUrl",""),
+                    "location":     gdata.get("currentLocation",""),
+                    "about":        gdata.get("aboutMe",""),
+                    "accounts":     [a.get("domain","") for a in gdata.get("accounts",[])],
+                }
+            except:
+                found[email] = {"gravatar": True}
+        time.sleep(0.15)
+    return found
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PASTE SEARCH — find username in public paste dumps
+# ══════════════════════════════════════════════════════════════════════════════
+
+def paste_search(username: str) -> list:
+    """Search psbdmp.ws (public Pastebin dump index) for username mentions."""
+    url = f"https://psbdmp.ws/api/v3/search/{urllib.parse.quote(username)}"
+    _, body = _fetch(url, timeout=15)
+    results = []
+    try:
+        data = json.loads(body)
+        items = data.get("data") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        for item in (items or [])[:10]:
+            if isinstance(item, dict):
+                results.append({
+                    "id":      item.get("id",""),
+                    "date":    item.get("time",""),
+                    "url":     f"https://pastebin.com/{item.get('id','')}",
+                    "snippet": (item.get("text") or "")[:120],
+                })
+    except: pass
+    return results
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PGP KEY LOOKUP
+# ══════════════════════════════════════════════════════════════════════════════
+
+def pgp_key_lookup(username: str) -> list:
+    """Search keys.openpgp.org for PGP keys matching username."""
+    url = f"https://keys.openpgp.org/vks/v1/search?q={urllib.parse.quote(username)}"
+    _, body = _fetch(url, timeout=10)
+    keys = []
+    fps = re.findall(r'([0-9A-F]{40})', body.upper())
+    uids = re.findall(r'uid[^:]*:.*?([^\n<>]+@[^\n<>]+)', body, re.IGNORECASE)
+    for fp in fps[:5]:
+        keys.append({"fingerprint": fp})
+    for uid in uids[:5]:
+        keys.append({"uid": uid.strip()})
+    return keys
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DORK LINKS — ready-to-open search intelligence URLs
+# ══════════════════════════════════════════════════════════════════════════════
+
+def generate_dork_links(username: str) -> dict:
+    """Generate Google/Bing/DDG dork search URLs for the username."""
+    q  = urllib.parse.quote(f'"{username}"')
+    qu = urllib.parse.quote(username)
+    return {
+        "google_exact":    f"https://www.google.com/search?q={q}",
+        "google_linkedin": f"https://www.google.com/search?q={q}+site:linkedin.com",
+        "google_github":   f"https://www.google.com/search?q={q}+site:github.com",
+        "google_pdf":      f"https://www.google.com/search?q={q}+filetype:pdf",
+        "google_email":    f"https://www.google.com/search?q={qu}+%40gmail.com+OR+%40yahoo.com",
+        "duckduckgo":      f"https://duckduckgo.com/?q={q}",
+        "bing":            f"https://www.bing.com/search?q={q}",
+        "pipl":            f"https://pipl.com/search/?q={qu}",
+        "spokeo":          f"https://www.spokeo.com/{qu}",
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  REVERSE IMAGE SEARCH LINKS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def reverse_image_links(avatar_url: str) -> list:
+    """Generate reverse image search URLs for a given avatar URL."""
+    enc = urllib.parse.quote(avatar_url, safe="")
+    return [
+        f"https://www.tineye.com/search?url={enc}",
+        f"https://yandex.com/images/search?rpt=imageview&url={enc}",
+        f"https://lens.google.com/uploadbyurl?url={enc}",
+        f"https://www.bing.com/images/search?view=detailv2&iss=sbi&q=imgurl:{enc}",
+    ]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  HTML REPORT GENERATOR
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1342,25 +1654,43 @@ def _print_results(target: str, all_results: dict, corr: dict,
             url   = hit["url"]
             lines = [f"  {G}[+]{N} {BOLD}{plat:20s}{N} {url}"]
             for field, label in [
-                ("display_name", "name"),      ("real_name", "real name"),
-                ("bio", "bio"),                ("location", "location"),
-                ("country", "country"),        ("followers", "followers"),
-                ("following", "following"),    ("email", "email"),
-                ("created_at", "joined"),      ("joined", "joined"),
-                ("last_seen", "last seen"),    ("last_online", "last online"),
-                ("streak", "streak"),          ("xp", "XP"),
-                ("languages", "languages"),    ("games_total", "games total"),
-                ("wins", "wins"),              ("losses", "losses"),
-                ("draws", "draws"),            ("status", "status"),
-                ("league", "league"),          ("title", "title"),
-                ("fide_rating", "FIDE"),       ("links", "links"),
-                ("patron", "patron"),          ("is_streamer", "streamer"),
-                ("twitch_url", "twitch"),      ("profile_url", "profile"),
-                ("twitter", "→twitter"),       ("github", "→github"),
-                ("proofs", "proofs"),          ("pgp_keys", "PGP keys"),
-                ("nitter_source", "via"),      ("tweets", "tweets"),
-                ("website", "website"),        ("banner_url", "banner"),
-                ("avatar_url", "avatar"),
+                ("display_name", "name"),        ("real_name", "real name"),
+                ("bio", "bio"),                  ("location", "location"),
+                ("city", "city"),                ("country", "country"),
+                ("organization", "org"),         ("company", "company"),
+                ("followers", "followers"),      ("following", "following"),
+                ("email", "email"),              ("website", "website"),
+                ("created_at", "joined"),        ("joined", "joined"),
+                ("updated_at", "last updated"),  ("last_seen", "last seen"),
+                ("last_online", "last online"),  ("hireable", "hireable"),
+                ("streak", "streak"),            ("xp", "XP"),
+                ("languages", "languages"),      ("games_total", "games total"),
+                ("wins", "wins"),                ("losses", "losses"),
+                ("draws", "draws"),              ("status", "status"),
+                ("league", "league"),            ("title", "title"),
+                ("fide_rating", "FIDE"),         ("links", "links"),
+                ("patron", "patron"),            ("is_streamer", "streamer"),
+                ("twitch_url", "twitch"),        ("profile_url", "profile"),
+                ("twitter", "→twitter"),         ("github", "→github"),
+                ("proofs", "proofs"),            ("pgp_keys", "PGP keys"),
+                ("nitter_source", "via"),        ("tweets", "tweets"),
+                ("banner_url", "banner"),        ("avatar_url", "avatar"),
+                ("public_repos", "repos"),       ("public_gists", "gists"),
+                ("total_stars", "★ stars"),      ("total_forks", "forks"),
+                ("top_languages", "languages"),  ("top_repos", "top repos"),
+                ("recent_activity", "activity"), ("karma_post", "karma(post)"),
+                ("karma_comment", "karma(cmt)"), ("scrobbles", "scrobbles"),
+                ("registered", "registered"),    ("patrons", "patrons"),
+                ("category", "category"),        ("repos", "docker repos"),
+                ("total_pulls", "docker pulls"), ("top_images", "images"),
+                ("packages", "npm pkgs"),        ("total_packages", "total pkgs"),
+                ("models", "hf models"),         ("datasets", "hf datasets"),
+                ("spaces", "hf spaces"),         ("rank", "rank"),
+                ("max_rank", "max rank"),        ("rating", "rating"),
+                ("max_rating", "max rating"),    ("contributions", "contrib"),
+                ("friends", "friends"),          ("followers_count", "followers"),
+                ("posts", "posts"),              ("did", "DID"),
+                ("stories", "stories"),          ("reads", "reads"),
             ]:
                 val = prof.get(field)
                 if not val and val != 0: continue
@@ -1546,6 +1876,60 @@ def run(username: Optional[str] = None, email: Optional[str] = None,
                     print(f"  {Y}[VAR]{N} '{var}' found on: {', '.join(plats)}")
             else:
                 print(f"      no variant accounts found")
+
+        # ── Email permutation + Gravatar probe ────────────────────────────────
+        for u in list(all_results.keys())[:1]:
+            print(f"  {B}[*] Email permutation probe for '{u}'...{N}")
+            email_hits = email_permutation_osint(u)
+            if email_hits:
+                for em, edata in email_hits.items():
+                    dn = edata.get("display_name","")
+                    acc = ", ".join(edata.get("accounts",[])[:4])
+                    print(f"  {R}[EMAIL]{N} {em}  name={dn}  accounts={acc}")
+            else:
+                print(f"      no email matches via Gravatar")
+
+        # ── Paste search ──────────────────────────────────────────────────────
+        for u in list(all_results.keys())[:1]:
+            print(f"  {B}[*] Paste dump search for '{u}'...{N}")
+            pastes = paste_search(u)
+            if pastes:
+                for p in pastes[:5]:
+                    print(f"  {R}[PASTE]{N} {p.get('url','')}  {DIM}{p.get('snippet','')[:80]}{N}")
+            else:
+                print(f"      no paste mentions found")
+
+        # ── PGP key lookup ────────────────────────────────────────────────────
+        for u in list(all_results.keys())[:1]:
+            print(f"  {B}[*] PGP key lookup for '{u}'...{N}")
+            pgp = pgp_key_lookup(u)
+            if pgp:
+                for k in pgp[:5]:
+                    fp  = k.get("fingerprint","")
+                    uid = k.get("uid","")
+                    print(f"  {G}[PGP]{N} " + (f"fingerprint={fp}" if fp else f"uid={uid}"))
+            else:
+                print(f"      no PGP keys found")
+
+        # ── Dork links ────────────────────────────────────────────────────────
+        for u in list(all_results.keys())[:1]:
+            dorks = generate_dork_links(u)
+            print(f"\n  {W}DORK SEARCH LINKS:{N}")
+            for name_, url_ in dorks.items():
+                print(f"  {DIM}{name_:20s}{N} {url_}")
+
+        # ── Reverse image search ──────────────────────────────────────────────
+        all_avatars = []
+        for u, hits in all_results.items():
+            for hit in hits:
+                av = hit.get("profile",{}).get("avatar_url","")
+                if av and av.startswith("http"):
+                    all_avatars.append((hit["platform"], av))
+        if all_avatars:
+            plat0, av0 = all_avatars[0]
+            print(f"\n  {W}REVERSE IMAGE SEARCH  ({plat0} avatar):{N}")
+            for link in reverse_image_links(av0):
+                print(f"  {DIM}{link}{N}")
 
     # ── Print full terminal report ────────────────────────────────────────────
     _print_results(target_label, all_results, corr, breach_data)
