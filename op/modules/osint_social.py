@@ -121,11 +121,12 @@ HEADERS = {
 #  PROFILE EXTRACTORS — pull structured data from found profiles
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _fetch(url, timeout=12) -> Tuple[int, str]:
-    req = urllib.request.Request(url, headers=HEADERS)
+def _fetch(url, timeout=12, extra_headers=None) -> Tuple[int, str]:
+    hdrs = {**HEADERS, **(extra_headers or {})}
+    req = urllib.request.Request(url, headers=hdrs)
     try:
         r = urllib.request.urlopen(req, timeout=timeout)
-        return r.status, r.read(32768).decode("utf-8", errors="ignore")
+        return r.status, r.read(65536).decode("utf-8", errors="ignore")
     except urllib.error.HTTPError as e:
         b = ""
         try: b = e.read(8192).decode("utf-8", errors="ignore")
@@ -266,31 +267,103 @@ def _extract_steam(username: str, body: str) -> dict:
 def _extract_chess(username: str, body: str) -> dict:
     try:
         d = json.loads(body)
-        return {
+        joined_ts   = d.get("joined", 0)
+        last_ts     = d.get("last_online", 0)
+        joined_dt   = datetime.utcfromtimestamp(joined_ts).strftime("%Y-%m-%d") if joined_ts else ""
+        last_dt     = datetime.utcfromtimestamp(last_ts).strftime("%Y-%m-%d %H:%M UTC") if last_ts else ""
+        base = {
             "display_name": d.get("name", ""),
             "location":     d.get("location", ""),
             "followers":    d.get("followers", 0),
             "country":      d.get("country", "").split("/")[-1],
-            "joined":       datetime.utcfromtimestamp(d.get("joined",0)).isoformat() if d.get("joined") else "",
+            "joined":       joined_dt,
+            "last_online":  last_dt,
             "status":       d.get("status", ""),
+            "league":       d.get("league", ""),
+            "is_streamer":  d.get("is_streamer", False),
+            "twitch_url":   d.get("twitch_url", ""),
             "verified":     d.get("verified", False),
+            "profile_url":  d.get("url", ""),
         }
+        # Fetch stats in a second call
+        _, stats_body = _fetch(f"https://api.chess.com/pub/player/{username}/stats")
+        try:
+            s = json.loads(stats_body)
+            for mode in ["chess_rapid", "chess_blitz", "chess_bullet", "chess_daily"]:
+                if mode in s:
+                    rec  = s[mode].get("record", {})
+                    last = s[mode].get("last", {})
+                    best = s[mode].get("best", {})
+                    base[mode] = (f"rating={last.get('rating','?')} "
+                                  f"best={best.get('rating','?')} "
+                                  f"W={rec.get('win','?')} L={rec.get('loss','?')} D={rec.get('draw','?')}")
+        except: pass
+        # Recent games (last month)
+        _, games_body = _fetch(f"https://api.chess.com/pub/player/{username}/games/archives")
+        try:
+            archives = json.loads(games_body).get("archives", [])
+            if archives:
+                _, recent_body = _fetch(archives[-1])
+                games = json.loads(recent_body).get("games", [])[-3:]
+                base["recent_games"] = [
+                    f"{g.get('white',{}).get('username','?')} vs {g.get('black',{}).get('username','?')} "
+                    f"[{g.get('time_class','?')}] result={g.get('white',{}).get('result','?')}"
+                    for g in games
+                ]
+        except: pass
+        return {k: v for k, v in base.items() if v or v == 0}
     except: return {}
 
 
 def _extract_lichess(username: str, body: str) -> dict:
     try:
         d = json.loads(body)
-        return {
+        created_dt = datetime.utcfromtimestamp(d.get("createdAt",0)//1000).strftime("%Y-%m-%d") if d.get("createdAt") else ""
+        seen_dt    = datetime.utcfromtimestamp(d.get("seenAt",0)//1000).strftime("%Y-%m-%d %H:%M UTC") if d.get("seenAt") else ""
+        base = {
             "display_name": d.get("username", ""),
             "title":        d.get("title", ""),
             "bio":          d.get("profile", {}).get("bio", ""),
             "country":      d.get("profile", {}).get("country", ""),
             "location":     d.get("profile", {}).get("location", ""),
+            "real_name":    d.get("profile", {}).get("realName", ""),
+            "fide_rating":  d.get("profile", {}).get("fideRating", ""),
+            "links":        d.get("profile", {}).get("links", ""),
             "followers":    d.get("nbFollowers", 0),
             "following":    d.get("nbFollowing", 0),
-            "created_at":   datetime.utcfromtimestamp(d.get("createdAt",0)//1000).isoformat() if d.get("createdAt") else "",
+            "patron":       d.get("patron", False),
+            "created_at":   created_dt,
+            "last_seen":    seen_dt,
+            "games_total":  d.get("count", {}).get("all", 0),
+            "games_rated":  d.get("count", {}).get("rated", 0),
+            "wins":         d.get("count", {}).get("win", 0),
+            "losses":       d.get("count", {}).get("loss", 0),
+            "draws":        d.get("count", {}).get("draw", 0),
         }
+        # Ratings per mode
+        for mode, info in d.get("perfs", {}).items():
+            if info.get("games", 0) > 0:
+                prog = info.get("prog", 0)
+                base[f"rating_{mode}"] = (f"{info.get('rating','?')} "
+                                          f"(games={info.get('games',0)} prog={prog:+d})")
+        # Recent games via ndjson API
+        _, games_body = _fetch(
+            f"https://lichess.org/api/games/user/{username}?max=5&opening=true",
+            extra_headers={"Accept": "application/x-ndjson"})
+        recent = []
+        for line in (games_body or "").strip().splitlines()[:5]:
+            try:
+                g = json.loads(line)
+                w       = g.get("players",{}).get("white",{}).get("user",{}).get("name","?")
+                b_      = g.get("players",{}).get("black",{}).get("user",{}).get("name","?")
+                opening = g.get("opening",{}).get("name","?")
+                winner  = g.get("winner","draw")
+                speed   = g.get("speed","?")
+                recent.append(f"{w} vs {b_} [{speed}] {opening} → {winner}")
+            except: pass
+        if recent:
+            base["recent_games"] = recent
+        return {k: v for k, v in base.items() if v or v == 0}
     except: return {}
 
 
@@ -550,6 +623,168 @@ def _deep_extract(result: dict, extract_key: str, username: str):
     if body:
         data = EXTRACTORS[extract_key](username, body)
         result["profile"] = {k: v for k, v in data.items() if v}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  WAYBACK MACHINE — historical snapshot check
+# ══════════════════════════════════════════════════════════════════════════════
+
+def wayback_check(username: str, platforms: list = None) -> dict:
+    """
+    Query Wayback Machine CDX API for historical snapshots of each platform profile.
+    Returns dict of {platform_url: {timestamp, snapshot_url, status}} for found snapshots.
+    Useful for finding deleted accounts or old profile data.
+    """
+    if platforms is None:
+        platforms = [
+            f"twitter.com/{username}",
+            f"instagram.com/{username}",
+            f"github.com/{username}",
+            f"linkedin.com/in/{username}",
+            f"facebook.com/{username}",
+            f"tiktok.com/@{username}",
+            f"reddit.com/user/{username}",
+        ]
+    results = {}
+    for site in platforms:
+        url = f"http://archive.org/wayback/available?url={site}"
+        _, body = _fetch(url)
+        try:
+            d    = json.loads(body)
+            snap = d.get("archived_snapshots", {}).get("closest", {})
+            if snap.get("available"):
+                results[site] = {
+                    "timestamp":    snap.get("timestamp", ""),
+                    "snapshot_url": snap.get("url", ""),
+                    "status":       snap.get("status", ""),
+                }
+            else:
+                results[site] = {"available": False}
+        except:
+            results[site] = {"error": "parse failed"}
+        time.sleep(0.3)
+    return results
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  USERNAME VARIATIONS — find alternate spellings across platforms
+# ══════════════════════════════════════════════════════════════════════════════
+
+def generate_username_variants(username: str) -> list:
+    """
+    Generate plausible username variations for a given username.
+    Covers common patterns: dots, underscores, numbers, prefixes, suffixes.
+    """
+    variants = set()
+    base = username.lower()
+
+    # dot / underscore separations at camelCase or number boundaries
+    dotted    = re.sub(r'([a-z])([A-Z])', r'\1.\2', username).lower()
+    underscored = re.sub(r'([a-z])([A-Z])', r'\1_\2', username).lower()
+    if dotted    != base: variants.add(dotted)
+    if underscored != base: variants.add(underscored)
+
+    # common suffixes
+    for suffix in ["_", "1", "01", "123", "_x", "_real", "_official", "hd"]:
+        variants.add(base + suffix)
+
+    # common prefixes
+    for prefix in ["the", "real", "i_am_", "iam", "x"]:
+        variants.add(prefix + base)
+
+    # split on numbers: dominikmarr123 → dominikmarr
+    stripped = re.sub(r'\d+$', '', base)
+    if stripped and stripped != base:
+        variants.add(stripped)
+
+    # if compound word, try splits: dominikmarr → dominik.marr, dominik_marr
+    # detect likely split point (two common first names or word boundary)
+    for i in range(3, len(base) - 2):
+        part1, part2 = base[:i], base[i:]
+        if len(part1) >= 3 and len(part2) >= 3:
+            variants.add(f"{part1}.{part2}")
+            variants.add(f"{part1}_{part2}")
+
+    variants.discard(base)
+    variants.discard(username)
+    return sorted(variants)
+
+
+def probe_username_variants(username: str, max_variants: int = 15) -> dict:
+    """
+    Check top username variants across key platforms.
+    Returns {variant: [platforms_found]} dict.
+    """
+    variants  = generate_username_variants(username)[:max_variants]
+    key_platforms = [
+        ("Instagram",  "https://www.instagram.com/{u}/",              '"username":"{u}"'),
+        ("GitHub",     "https://api.github.com/users/{u}",            '"login":'),
+        ("Twitter/X",  "https://x.com/{u}",                           '"screen_name":"{u}"'),
+        ("TikTok",     "https://www.tiktok.com/@{u}",                 '"uniqueId":'),
+        ("Reddit",     "https://www.reddit.com/user/{u}/about.json",  '"name":'),
+        ("LinkedIn",   "https://www.linkedin.com/in/{u}",             None),
+    ]
+    found = {}
+    for variant in variants:
+        hits = []
+        for plat_name, url_tpl, confirm in key_platforms:
+            url = url_tpl.replace("{u}", variant)
+            status, body = _fetch(url)
+            if status == 200:
+                if confirm:
+                    c = confirm.replace("{u}", variant.lower())
+                    if c.lower() in body.lower():
+                        hits.append(plat_name)
+                else:
+                    if variant.lower() in body.lower() and "not found" not in body.lower():
+                        hits.append(plat_name)
+            time.sleep(0.2)
+        if hits:
+            found[variant] = hits
+    return found
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TWITTER / NITTER FALLBACK — extract Twitter profile without API key
+# ══════════════════════════════════════════════════════════════════════════════
+
+_NITTER_MIRRORS = [
+    "https://nitter.poast.org",
+    "https://nitter.privacydev.net",
+    "https://nitter.1d4.us",
+    "https://nitter.kavin.rocks",
+    "https://nitter.fdn.fr",
+]
+
+def _extract_twitter_nitter(username: str) -> dict:
+    """Try multiple nitter mirrors to extract Twitter profile data."""
+    for mirror in _NITTER_MIRRORS:
+        status, body = _fetch(f"{mirror}/{username}")
+        if status != 200 or "Sorry" in body or len(body) < 500:
+            continue
+        if username.lower() not in body.lower():
+            continue
+        def _re_f(pat, flags=0):
+            m = re.search(pat, body, flags)
+            return m.group(1).strip() if m else ""
+        result = {
+            "display_name": _re_f(r'class="profile-card-fullname"[^>]*>\s*([^<]+)'),
+            "username":     _re_f(r'class="profile-card-username"[^>]*>\s*([^<]+)'),
+            "bio":          re.sub(r'<[^>]+>', '', _re_f(r'class="profile-bio"[^>]*>\s*<p[^>]*>(.*?)</p>', re.DOTALL)).strip(),
+            "tweets":       _re_f(r'title="Tweets".*?<span[^>]*>([\d,]+)', re.DOTALL),
+            "following":    _re_f(r'title="Following".*?<span[^>]*>([\d,]+)', re.DOTALL),
+            "followers":    _re_f(r'title="Followers".*?<span[^>]*>([\d,]+)', re.DOTALL),
+            "location":     _re_f(r'class="profile-location"[^>]*>.*?<span[^>]*>([^<]+)', re.DOTALL),
+            "website":      _re_f(r'class="profile-website".*?href="([^"]+)"', re.DOTALL),
+            "joined":       _re_f(r'Joined\s*<span[^>]*>([^<]+)'),
+            "avatar_url":   _re_f(r'class="[^"]*avatar[^"]*"[^>]*src="([^"]+)"'),
+            "banner_url":   _re_f(r'class="[^"]*banner[^"]*".*?src="([^"]+)"', re.DOTALL),
+            "nitter_source": mirror,
+        }
+        cleaned = {k: v for k, v in result.items() if v}
+        if len(cleaned) > 2:
+            return cleaned
+    return {}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1106,15 +1341,45 @@ def _print_results(target: str, all_results: dict, corr: dict,
             plat  = hit["platform"]
             url   = hit["url"]
             lines = [f"  {G}[+]{N} {BOLD}{plat:20s}{N} {url}"]
-            if prof.get("display_name"): lines.append(f"      {'name':12s} {prof['display_name']}")
-            if prof.get("bio"):          lines.append(f"      {'bio':12s} {str(prof['bio'])[:80]}")
-            if prof.get("location"):     lines.append(f"      {'location':12s} {prof['location']}")
-            if prof.get("followers"):    lines.append(f"      {'followers':12s} {prof['followers']}")
-            if prof.get("email"):        lines.append(f"      {R}{'email':12s} {prof['email']}{N}")
-            if prof.get("created_at"):   lines.append(f"      {'joined':12s} {str(prof['created_at'])[:19]}")
-            if prof.get("twitter"):      lines.append(f"      {'→twitter':12s} @{prof['twitter']}")
-            if prof.get("github"):       lines.append(f"      {'→github':12s} @{prof['github']}")
-            if prof.get("proofs"):       lines.append(f"      {'proofs':12s} {', '.join(prof['proofs'][:4])}")
+            for field, label in [
+                ("display_name", "name"),      ("real_name", "real name"),
+                ("bio", "bio"),                ("location", "location"),
+                ("country", "country"),        ("followers", "followers"),
+                ("following", "following"),    ("email", "email"),
+                ("created_at", "joined"),      ("joined", "joined"),
+                ("last_seen", "last seen"),    ("last_online", "last online"),
+                ("streak", "streak"),          ("xp", "XP"),
+                ("languages", "languages"),    ("games_total", "games total"),
+                ("wins", "wins"),              ("losses", "losses"),
+                ("draws", "draws"),            ("status", "status"),
+                ("league", "league"),          ("title", "title"),
+                ("fide_rating", "FIDE"),       ("links", "links"),
+                ("patron", "patron"),          ("is_streamer", "streamer"),
+                ("twitch_url", "twitch"),      ("profile_url", "profile"),
+                ("twitter", "→twitter"),       ("github", "→github"),
+                ("proofs", "proofs"),          ("pgp_keys", "PGP keys"),
+                ("nitter_source", "via"),      ("tweets", "tweets"),
+                ("website", "website"),        ("banner_url", "banner"),
+                ("avatar_url", "avatar"),
+            ]:
+                val = prof.get(field)
+                if not val and val != 0: continue
+                if isinstance(val, list):
+                    val = ", ".join(str(x) for x in val[:4])
+                col = R if field == "email" else N
+                lines.append(f"      {col}{label:14s}{N} {str(val)[:100]}")
+
+            # Rating lines (chess/lichess)
+            for k, v in prof.items():
+                if k.startswith("rating_") or k in ("chess_rapid","chess_blitz","chess_bullet","chess_daily"):
+                    lines.append(f"      {k:14s} {str(v)[:80]}")
+
+            # Recent games
+            if prof.get("recent_games"):
+                lines.append(f"      {'recent games':14s}")
+                for g in (prof["recent_games"])[:3]:
+                    lines.append(f"        {DIM}{str(g)[:90]}{N}")
+
             print("\n".join(lines))
 
     # ── Breach data ───────────────────────────────────────────────────────────
@@ -1166,7 +1431,7 @@ def run(username: Optional[str] = None, email: Optional[str] = None,
     deep=True  → extract profile data + run correlation (default)
     report=True → also save HTML report to reports/
     """
-    G="\033[92m"; C="\033[96m"; W="\033[93m"; R="\033[91m"; N="\033[0m"; B="\033[94m"
+    G="\033[92m"; C="\033[96m"; W="\033[93m"; Y="\033[93m"; R="\033[91m"; N="\033[0m"; B="\033[94m"; DIM="\033[90m"
 
     print(f"\n{C}{'─'*60}{N}")
     print(f"  {G}OSINT SOCIAL v2{N} — 80+ platforms · deep extraction · correlation")
@@ -1239,6 +1504,48 @@ def run(username: Optional[str] = None, email: Optional[str] = None,
                     if act:
                         print(f"      subreddits: {', '.join(act.get('top_subreddits',[]))}")
                         print(f"      timezone:   {act.get('timezone_estimate','?')}")
+
+        # ── Twitter nitter fallback ───────────────────────────────────────────
+        for u, hits in all_results.items():
+            for hit in hits:
+                if isinstance(hit, dict) and hit.get("platform") == "Twitter/X":
+                    if not hit.get("profile"):
+                        print(f"  {B}[*] Twitter nitter fallback for @{u}...{N}")
+                        tw = _extract_twitter_nitter(u)
+                        if tw:
+                            hit["profile"] = tw
+                            print(f"      name={tw.get('display_name','?')} "
+                                  f"followers={tw.get('followers','?')} "
+                                  f"tweets={tw.get('tweets','?')}")
+                        else:
+                            print(f"      all nitter mirrors blocked")
+
+        # ── Wayback Machine snapshots ─────────────────────────────────────────
+        for u in list(all_results.keys())[:1]:  # run once for primary username
+            print(f"  {B}[*] Wayback Machine snapshot check for '{u}'...{N}")
+            wb = wayback_check(u)
+            found_snaps = {k: v for k, v in wb.items() if v.get("available") is not False and not v.get("error")}
+            if found_snaps:
+                for site, snap in found_snaps.items():
+                    print(f"  {G}[WB]{N} {site}: snapshot {snap.get('timestamp','')} → {snap.get('snapshot_url','')[:80]}")
+            else:
+                print(f"      no historical snapshots found")
+            # Store in results for report
+            for hits in all_results.get(u, []):
+                if isinstance(hits, dict):
+                    hits["wayback"] = wb
+                    break
+
+        # ── Username variations probe ─────────────────────────────────────────
+        for u in list(all_results.keys())[:1]:
+            variants = generate_username_variants(u)
+            print(f"  {B}[*] Probing {min(len(variants),12)} username variants of '{u}'...{N}")
+            variant_hits = probe_username_variants(u, max_variants=12)
+            if variant_hits:
+                for var, plats in variant_hits.items():
+                    print(f"  {Y}[VAR]{N} '{var}' found on: {', '.join(plats)}")
+            else:
+                print(f"      no variant accounts found")
 
     # ── Print full terminal report ────────────────────────────────────────────
     _print_results(target_label, all_results, corr, breach_data)
